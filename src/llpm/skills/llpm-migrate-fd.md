@@ -7,10 +7,10 @@ You are migrating a project from the old Feature Design (FD) system to LLPM. The
 First, determine what exists:
 
 ```bash
-llpm init  # safe to re-run, won't clobber existing docs/
+llpm init  # safe to re-run, won't clobber existing llpm/
 ```
 
-Look for old FD documents. They typically live in `docs/` or `docs/tickets/` and have this format:
+Look for old FD documents. They typically live in `llpm/` or `llpm/tickets/` and have this format:
 
 ```markdown
 **ID**: FD-001
@@ -26,9 +26,9 @@ Look for old FD documents. They typically live in `docs/` or `docs/tickets/` and
 Search for them:
 ```bash
 # Look for old bold-text frontmatter files
-grep -rl '^\*\*ID\*\*:' docs/ 2>/dev/null
+grep -rl '^\*\*ID\*\*:' llpm/ 2>/dev/null
 # Also check for FD- prefixed files
-find docs/ -name 'FD-*.md' 2>/dev/null
+find llpm/ -name 'FD-*.md' 2>/dev/null
 ```
 
 ## Step 2: Convert each document
@@ -97,7 +97,7 @@ Check for:
 ## Important notes
 
 - Do NOT use `llpm create` for migration -- that would assign new IDs. Instead, write the files directly with the correct converted IDs to preserve the existing numbering.
-- The `docs/templates/` directory should already exist from `llpm init`. Don't overwrite customized templates.
+- The `llpm/templates/` directory should already exist from `llpm init`. Don't overwrite customized templates.
 - If the old system had a `children` field, drop it. LLPM derives children from the `parent` field.
 - If the old system had a `blocked` status stored explicitly, convert it: set the actual status (e.g., `open` or `in-progress`) and ensure the blocking tickets are in the `blockers` list. LLPM will derive the blocked state.
 - Run `llpm list --status blocked` after migration to verify blocker relationships are correct.

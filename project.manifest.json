@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "slug": "llpm",
+  "name": "LLPM",
+  "summary": "Markdown-based project management CLI for LLM multi-agent workflows",
+  "description": "A stateless, markdown-based project management tool designed for LLM multi-agent workflows. Stores tickets as YAML-frontmatter markdown files, provides a full CLI for creating, listing, and managing tickets with dependencies and status tracking, and ships bundled Claude skills for PM, planner, and worker agent roles. Python 3.12+, PyYAML, built with UV.",
+  "status": "active",
+  "tags": [
+    "python",
+    "cli",
+    "personal"
+  ],
+  "created": "2026-04-11",
+  "aliases": [],
+  "related": [],
+  "inbox": [],
+  "extensions": {}
+}

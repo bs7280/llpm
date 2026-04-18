@@ -27,7 +27,7 @@ def _build_parser():
         "--docs-root",
         default=None,
         help=(
-            "Path to the docs directory (default: ./docs/ or LLPM_DOCS_ROOT env var). "
+            "Path to the docs directory (default: ./llpm/ or LLPM_DOCS_ROOT env var). "
             "Must come BEFORE the subcommand."
         ),
     )
@@ -38,8 +38,8 @@ def _build_parser():
     p_init = subparsers.add_parser(
         "init",
         description=(
-            "Initialize LLPM in a project. Creates docs/tickets/, docs/tickets/archive/, "
-            "and copies built-in templates to docs/templates/. Safe to re-run -- won't "
+            "Initialize LLPM in a project. Creates llpm/tickets/, llpm/tickets/archive/, "
+            "and copies built-in templates to llpm/templates/. Safe to re-run -- won't "
             "overwrite existing templates."
         ),
         help="Initialize LLPM project structure and templates",
@@ -98,7 +98,7 @@ def _build_parser():
     p_create = subparsers.add_parser(
         "create",
         description=(
-            "Create a new ticket from a template. Templates are read from docs/templates/. "
+            "Create a new ticket from a template. Templates are read from llpm/templates/. "
             "Without a body, ticket is created as 'draft' with the template body as placeholder. "
             "With a body (--body, --body-file, or piped stdin), ticket is created as 'open' "
             "and the body replaces the template content. File creation is atomic (O_EXCL) "
@@ -108,7 +108,7 @@ def _build_parser():
     )
     p_create.add_argument(
         "ticket_type",
-        help="Ticket type (epic, feature, task, research, or custom). Must have a matching template in docs/templates/.",
+        help="Ticket type (epic, feature, task, research, or custom). Must have a matching template in llpm/templates/.",
     )
     p_create.add_argument("title", help="Human-readable title for the ticket")
     p_create.add_argument("--body", help="Inline body text (replaces template body, sets status to 'open')")

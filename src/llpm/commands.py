@@ -54,7 +54,7 @@ def _resolve_docs_root(args) -> Path:
     env = os.environ.get("LLPM_DOCS_ROOT")
     if env:
         return Path(env).resolve()
-    return Path("docs").resolve()
+    return Path("llpm").resolve()
 
 
 def _templates_source() -> Path:

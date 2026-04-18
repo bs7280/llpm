@@ -9,9 +9,9 @@ llpm init
 ```
 
 This creates:
-- `docs/tickets/` -- where all ticket markdown files live
-- `docs/tickets/archive/` -- for completed/closed tickets
-- `docs/templates/` -- editable templates for each ticket type
+- `llpm/tickets/` -- where all ticket markdown files live
+- `llpm/tickets/archive/` -- for completed/closed tickets
+- `llpm/templates/` -- editable templates for each ticket type
 
 ## Step 2: Understand the project and create initial tickets
 
@@ -93,21 +93,66 @@ draft -> planned -> open -> in-progress -> review -> complete
 
 ## Step 4: Update CLAUDE.md
 
-Add LLPM conventions to the project's CLAUDE.md so all agents know how to use it:
+**This step is critical.** Add an LLPM section to the project's `CLAUDE.md` so that every agent session knows how to use LLPM, what role it should play, and how to interact with the ticket system. Without this, agents will not know LLPM exists.
+
+Add the following to `CLAUDE.md`, adapting it to the project's specifics:
 
 ```markdown
-## Project Management
+## Project Management (LLPM)
 
-This project uses LLPM for task tracking. All tickets live in `docs/tickets/`.
+This project uses LLPM for markdown-based task tracking. All tickets live in `llpm/tickets/`.
 
-Key commands:
-- `llpm board` -- see active work
-- `llpm show <ID>` -- read a ticket's full spec
+### Quick Reference
+
+- `llpm board` -- see active work (kanban view)
+- `llpm backlog` -- see planned/draft tickets
+- `llpm show <ID>` -- read a ticket's full spec and body
 - `llpm status <ID> <status>` -- update ticket status
+- `llpm blocker add <ID> --blocked-by <ID>` -- add a dependency
 - `llpm help --verbose` -- full CLI reference
 
-Before starting work, check `llpm board` and `llpm show` for context.
-After completing work, update the ticket status to `review`.
+### Agent Roles
+
+Different agent sessions serve different roles. Follow the guidelines for your role:
+
+#### Worker
+You implement tickets. Your workflow:
+1. Run `llpm board` to find open/unblocked tickets ready for work
+2. Run `llpm show <ID>` to read the full spec
+3. Run `llpm status <ID> in-progress` to claim the ticket
+4. Implement the work according to the ticket spec
+5. Run `llpm status <ID> review` when done (or `complete` if no review is needed)
+
+Do not create or modify ticket specs. If the spec is unclear or incomplete, set the ticket back to `planned` and add a note in the body explaining what's missing.
+
+#### Planner
+You research, design, and write ticket specs. Your workflow:
+1. Review `llpm backlog` for draft/planned tickets that need fleshing out
+2. Research the codebase, ask the user questions, and iterate on the design
+3. Write detailed specs in ticket bodies (Problem, Solution, Files, Acceptance Criteria)
+4. Break large tickets into subtasks with `llpm create task --parent <ID>`
+5. Set up dependencies with `llpm blocker add`
+6. Set tickets to `open` when the spec is ready for a worker to pick up
+
+You may also create new tickets from research or user conversations.
+
+#### Grooming / PM
+You manage the backlog and help the user prioritize. Your workflow:
+1. Review `llpm list` and `llpm board` for the current state of work
+2. Discuss priorities, scope, and feature ideas with the user
+3. Create and refine epics and features at a high level
+4. Triage `llpm todo -l` items into proper tickets or discard them
+5. Ensure ticket hierarchy makes sense (epics -> features -> tasks)
+6. Flag blocked or stale tickets and help resolve dependencies
+
+You focus on *what* to build and *why*, not implementation details.
+
+#### Tester
+You verify completed work. Your workflow:
+1. Run `llpm list --status review` to find tickets awaiting verification
+2. Run `llpm show <ID>` to read the acceptance criteria
+3. Run tests, check the implementation, verify the criteria are met
+4. Run `llpm status <ID> complete` if it passes, or `llpm status <ID> in-progress` with a body note explaining what failed
 ```
 
 ## CLI Quick Reference
