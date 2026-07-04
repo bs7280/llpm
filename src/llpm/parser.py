@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import os
 import re
 from pathlib import Path
 
@@ -39,18 +40,18 @@ def _normalize_value(value):
     return value
 
 
-def parse_document(path: Path) -> tuple[dict, str]:
-    """Parse a markdown file with YAML frontmatter.
+def parse_text(text: str, source="<text>") -> tuple[dict, str]:
+    """Parse markdown text with YAML frontmatter.
 
     Returns (frontmatter_dict, body_str). Raises ValueError on malformed input.
+    ``source`` appears in error messages only.
     """
-    text = path.read_text(encoding="utf-8")
     if not text.startswith("---"):
-        raise ValueError(f"No frontmatter found in {path}")
+        raise ValueError(f"No frontmatter found in {source}")
 
     parts = text.split("---", 2)
     if len(parts) < 3:
-        raise ValueError(f"Unterminated frontmatter in {path}")
+        raise ValueError(f"Unterminated frontmatter in {source}")
 
     # parts[0] is empty (before first ---), parts[1] is YAML, parts[2] is body
     raw_yaml = parts[1]
@@ -60,7 +61,7 @@ def parse_document(path: Path) -> tuple[dict, str]:
 
     data = yaml.safe_load(raw_yaml)
     if not isinstance(data, dict):
-        raise ValueError(f"Frontmatter is not a mapping in {path}")
+        raise ValueError(f"Frontmatter is not a mapping in {source}")
 
     # Normalize dates
     for key, value in data.items():
@@ -69,11 +70,24 @@ def parse_document(path: Path) -> tuple[dict, str]:
     return data, body
 
 
+def parse_document(path: Path) -> tuple[dict, str]:
+    """Parse a markdown file with YAML frontmatter.
+
+    Returns (frontmatter_dict, body_str). Raises ValueError on malformed input.
+    """
+    text = path.read_text(encoding="utf-8")
+    return parse_text(text, source=path)
+
+
+def serialize_document(frontmatter: dict, body: str) -> str:
+    """Serialize frontmatter + body to markdown text."""
+    yaml_str = yaml.safe_dump(frontmatter, sort_keys=False, default_flow_style=False, allow_unicode=True)
+    return f"---\n{yaml_str}---\n{body}"
+
+
 def write_document(path: Path, frontmatter: dict, body: str) -> None:
     """Write a markdown file with YAML frontmatter."""
-    yaml_str = yaml.safe_dump(frontmatter, sort_keys=False, default_flow_style=False, allow_unicode=True)
-    content = f"---\n{yaml_str}---\n{body}"
-    path.write_text(content, encoding="utf-8")
+    path.write_text(serialize_document(frontmatter, body), encoding="utf-8")
 
 
 # -- Validation --
@@ -124,20 +138,22 @@ def _prefix_for_type(ticket_type: str) -> str:
 
 
 # -- Ticket Discovery --
+#
+# These functions accept either a docs_root Path (wrapped in a LocalDirStore)
+# or a TicketStore instance. Every read bottoms out in store methods so that
+# alternative store implementations see all traffic.
+
+def _as_store(source):
+    """Coerce a docs_root path into a LocalDirStore; pass stores through."""
+    if isinstance(source, (str, os.PathLike)):
+        from .store import LocalDirStore
+        return LocalDirStore(Path(source))
+    return source
+
 
 def find_tickets(docs_root: Path, include_archive: bool = True) -> list[Path]:
     """Find all ticket markdown files under docs_root/tickets/."""
-    tickets_dir = docs_root / "tickets"
-    if not tickets_dir.exists():
-        return []
-
-    results = list(tickets_dir.glob("*.md"))
-    if include_archive:
-        archive_dir = tickets_dir / "archive"
-        if archive_dir.exists():
-            results.extend(archive_dir.glob("*.md"))
-
-    return sorted(results)
+    return _as_store(docs_root).list_tickets(include_archive=include_archive)
 
 
 def find_tickets_active(docs_root: Path) -> list[Path]:
@@ -156,11 +172,12 @@ def find_ticket_by_id(docs_root: Path, ticket_id: str) -> Path | None:
 
 def load_all_tickets(docs_root: Path, include_archive: bool = True) -> list[tuple[Path, dict, str]]:
     """Parse all tickets, skipping files that fail to parse."""
+    store = _as_store(docs_root)
     results = []
-    for path in find_tickets(docs_root, include_archive=include_archive):
+    for ref in store.list_tickets(include_archive=include_archive):
         try:
-            fm, body = parse_document(path)
-            results.append((path, fm, body))
+            fm, body = store.read_ref(ref)
+            results.append((ref, fm, body))
         except (ValueError, yaml.YAMLError):
             continue
     return results
@@ -173,6 +190,8 @@ def next_id(docs_root: Path, ticket_type: str) -> str:
 
     Scans all tickets (including archive) to find the highest existing number,
     then returns the next one. Zero-pads to 3 digits.
+
+    Stays client-side (scan-for-max) so it works identically against any store.
     """
     prefix = _prefix_for_type(ticket_type)
     max_num = 0
@@ -200,16 +219,17 @@ def is_blocked(docs_root: Path, frontmatter: dict) -> bool:
     if not blockers:
         return False
 
+    store = _as_store(docs_root)
     for blocker_id in blockers:
-        path = find_ticket_by_id(docs_root, blocker_id)
-        if path is None:
+        try:
+            found = store.read(blocker_id)
+        except (ValueError, yaml.YAMLError):
+            return True
+        if found is None:
             # Dangling reference -- treat as blocking (shouldn't happen with validation)
             return True
-        try:
-            fm, _ = parse_document(path)
-            if fm.get("status") not in RESOLVED_STATUSES:
-                return True
-        except (ValueError, yaml.YAMLError):
+        _, fm, _ = found
+        if fm.get("status") not in RESOLVED_STATUSES:
             return True
 
     return False
@@ -220,9 +240,20 @@ def get_blocker_details(docs_root: Path, frontmatter: dict) -> list[dict]:
     blockers = frontmatter.get("blockers") or []
     details = []
 
+    store = _as_store(docs_root)
     for blocker_id in blockers:
-        path = find_ticket_by_id(docs_root, blocker_id)
-        if path is None:
+        try:
+            found = store.read(blocker_id)
+        except (ValueError, yaml.YAMLError):
+            details.append({
+                "id": blocker_id,
+                "status": "parse error",
+                "title": "???",
+                "resolved": False,
+            })
+            continue
+
+        if found is None:
             details.append({
                 "id": blocker_id,
                 "status": "not found",
@@ -231,21 +262,13 @@ def get_blocker_details(docs_root: Path, frontmatter: dict) -> list[dict]:
             })
             continue
 
-        try:
-            fm, _ = parse_document(path)
-            details.append({
-                "id": fm.get("id", blocker_id),
-                "status": fm.get("status", "unknown"),
-                "title": fm.get("title", "???"),
-                "resolved": fm.get("status") in RESOLVED_STATUSES,
-            })
-        except (ValueError, yaml.YAMLError):
-            details.append({
-                "id": blocker_id,
-                "status": "parse error",
-                "title": "???",
-                "resolved": False,
-            })
+        _, fm, _ = found
+        details.append({
+            "id": fm.get("id", blocker_id),
+            "status": fm.get("status", "unknown"),
+            "title": fm.get("title", "???"),
+            "resolved": fm.get("status") in RESOLVED_STATUSES,
+        })
 
     return details
 
