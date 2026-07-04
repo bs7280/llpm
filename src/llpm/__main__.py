@@ -58,9 +58,11 @@ def _build_parser():
     p_list.add_argument("--status", help="Filter by effective status (e.g., open, blocked, in-progress)")
     p_list.add_argument("--type", help="Filter by ticket type (e.g., task, feature, epic)")
     p_list.add_argument("--parent", help="Filter by parent ticket ID (case-insensitive)")
+    p_list.add_argument("--json", action="store_true", help="Output as JSON array")
+    p_list.add_argument("--include-archived", action="store_true", help="Include archived tickets (only with --json)")
 
     # -- board --
-    subparsers.add_parser(
+    p_board = subparsers.add_parser(
         "board",
         description=(
             "Kanban board view showing active work. Displays 4 columns: BLOCKED, OPEN, "
@@ -70,9 +72,10 @@ def _build_parser():
         ),
         help="Kanban board of active work (blocked/open/in-progress/review)",
     )
+    p_board.add_argument("--json", action="store_true", help="Output as JSON array")
 
     # -- backlog --
-    subparsers.add_parser(
+    p_backlog = subparsers.add_parser(
         "backlog",
         description=(
             "Show the pre-work pipeline: PLANNED tickets (spec'd, awaiting approval) "
@@ -81,6 +84,7 @@ def _build_parser():
         ),
         help="Show planned and draft tickets",
     )
+    p_backlog.add_argument("--json", action="store_true", help="Output as JSON array")
 
     # -- show --
     p_show = subparsers.add_parser(
@@ -93,6 +97,7 @@ def _build_parser():
         help="Show full ticket details",
     )
     p_show.add_argument("ticket_id", help="Ticket ID (e.g., FEAT-001). Case-insensitive.")
+    p_show.add_argument("--json", action="store_true", help="Output as JSON object")
 
     # -- create --
     p_create = subparsers.add_parser(
@@ -184,6 +189,7 @@ def _build_parser():
 
     p_bl = blocker_sub.add_parser("list", help="List blockers with resolution status")
     p_bl.add_argument("ticket_id", help="Ticket ID to list blockers for")
+    p_bl.add_argument("--json", action="store_true", help="Output as JSON object")
 
     # -- archive --
     p_archive = subparsers.add_parser(
@@ -226,6 +232,7 @@ def _build_parser():
     p_todo.add_argument("--rm", type=int, metavar="ID", help="Remove a TODO item by its stable ID")
     p_todo.add_argument("--list", "-l", action="store_true", help="List all TODO items")
     p_todo.add_argument("--interactive", "-i", action="store_true", help="REPL mode for rapid entry")
+    p_todo.add_argument("--json", action="store_true", help="Output as JSON (works with --add, --rm, --list)")
 
     # -- skills --
     p_skills = subparsers.add_parser(
@@ -240,6 +247,17 @@ def _build_parser():
     )
     p_skills.add_argument("--show", "-s", metavar="NAME", help="Print a skill's content to stdout")
     p_skills.add_argument("--install", metavar="NAME", help="Install a skill to .claude/commands/")
+
+    # -- project --
+    p_project = subparsers.add_parser(
+        "project",
+        description=(
+            "Show project-level metadata: paths, valid enums, and ticket counts. "
+            "With --json, returns a single object suitable for bootstrapping a UI."
+        ),
+        help="Show project metadata and ticket counts",
+    )
+    p_project.add_argument("--json", action="store_true", help="Output as JSON object")
 
     # -- help --
     p_help = subparsers.add_parser(
@@ -275,6 +293,7 @@ def main(argv: list[str] | None = None) -> None:
         "set": commands.cmd_set,
         "archive": commands.cmd_archive,
         "delete": commands.cmd_delete,
+        "project": commands.cmd_project,
         "skills": commands.cmd_skills,
         "todo": commands.cmd_todo,
     }

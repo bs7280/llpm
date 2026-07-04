@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -89,6 +90,57 @@ def _require_ticket(docs_root: Path, ticket_id: str) -> tuple[Path, dict, str]:
     return path, fm, body
 
 
+def _ticket_to_dict(docs_root: Path, path: Path, fm: dict, body: str | None = None) -> dict:
+    """Serialize a ticket to the JSON output schema.
+
+    If body is None, it is omitted (list mode). If provided, it is included (show mode).
+    """
+    eff_status = parser.effective_status(docs_root, fm)
+    is_blocked = eff_status == "blocked"
+
+    children = parser.get_children(docs_root, fm["id"])
+    child_ids = [c["id"] for c in children]
+
+    blocker_details = parser.get_blocker_details(docs_root, fm) if fm.get("blockers") else []
+
+    archived = "archive" in path.parts
+
+    result = {
+        "id": fm["id"],
+        "type": fm["type"],
+        "title": fm["title"],
+        "status": fm["status"],
+        "effective_status": eff_status,
+        "is_blocked": is_blocked,
+        "priority": fm["priority"],
+        "effort": fm.get("effort"),
+        "parent": fm.get("parent"),
+        "children": child_ids,
+        "blockers": [
+            {"id": d["id"], "resolved": d["resolved"]}
+            for d in blocker_details
+        ],
+        "tags": fm.get("tags") or [],
+        "requires_human": fm.get("requires_human", False),
+        "created": fm.get("created"),
+        "updated": fm.get("updated"),
+        "completed": fm.get("completed"),
+        "archived": archived,
+        "path": str(path),
+    }
+
+    if body is not None:
+        result["body"] = body
+        result["body_html"] = None
+
+    return result
+
+
+def _json_out(data) -> None:
+    """Print data as JSON to stdout."""
+    print(json.dumps(data, indent=2, default=str))
+
+
 # -- Commands --
 
 def cmd_init(args) -> None:
@@ -122,9 +174,15 @@ def cmd_list(args) -> None:
     docs_root = _resolve_docs_root(args)
     _require_initialized(docs_root)
 
-    tickets = parser.load_all_tickets(docs_root, include_archive=False)
+    include_archived = getattr(args, "include_archived", False)
+    use_json = getattr(args, "json", False)
+
+    tickets = parser.load_all_tickets(docs_root, include_archive=include_archived)
     if not tickets:
-        print("No tickets found.")
+        if use_json:
+            _json_out([])
+        else:
+            print("No tickets found.")
         return
 
     # Apply filters
@@ -145,7 +203,11 @@ def cmd_list(args) -> None:
             if p.upper() != parent_filter.upper():
                 continue
 
-        filtered.append((fm, eff_status))
+        filtered.append((path, fm, eff_status))
+
+    if use_json:
+        _json_out([_ticket_to_dict(docs_root, path, fm) for path, fm, _ in filtered])
+        return
 
     if not filtered:
         print("No tickets match the filters.")
@@ -154,7 +216,7 @@ def cmd_list(args) -> None:
     # Print table
     print(f"{'ID':<16} {'Type':<11} {'Status':<15} {'Priority':<11} Title")
     print("-" * 75)
-    for fm, eff_status in filtered:
+    for path, fm, eff_status in filtered:
         print(f"{fm['id']:<16} {fm['type']:<11} {eff_status:<15} {fm['priority']:<11} {fm['title']}")
 
 
@@ -162,13 +224,23 @@ def cmd_board(args) -> None:
     docs_root = _resolve_docs_root(args)
     _require_initialized(docs_root)
 
+    use_json = getattr(args, "json", False)
     tickets = parser.load_all_tickets(docs_root, include_archive=False)
+    board_statuses = {"blocked", "open", "in-progress", "review"}
     columns = {"blocked": [], "open": [], "in-progress": [], "review": []}
 
     for path, fm, body in tickets:
         eff_status = parser.effective_status(docs_root, fm)
         if eff_status in columns:
-            columns[eff_status].append(fm)
+            columns[eff_status].append((path, fm))
+
+    if use_json:
+        result = []
+        for col_name in ("blocked", "open", "in-progress", "review"):
+            for path, fm in columns[col_name]:
+                result.append(_ticket_to_dict(docs_root, path, fm))
+        _json_out(result)
+        return
 
     for col_name in ("blocked", "open", "in-progress", "review"):
         items = columns[col_name]
@@ -176,7 +248,7 @@ def cmd_board(args) -> None:
         if not items:
             print("  (empty)")
         else:
-            for fm in items:
+            for path, fm in items:
                 pri = fm.get("priority", "medium")
                 indicator = "!!!" if pri == "high" else " ! " if pri == "medium" else "   "
                 print(f"  {indicator} {fm['id']:<16} {fm['title']}")
@@ -187,13 +259,22 @@ def cmd_backlog(args) -> None:
     docs_root = _resolve_docs_root(args)
     _require_initialized(docs_root)
 
+    use_json = getattr(args, "json", False)
     tickets = parser.load_all_tickets(docs_root, include_archive=False)
     sections = {"planned": [], "draft": []}
 
     for path, fm, body in tickets:
         status = fm.get("status")
         if status in sections:
-            sections[status].append(fm)
+            sections[status].append((path, fm))
+
+    if use_json:
+        result = []
+        for section in ("planned", "draft"):
+            for path, fm in sections[section]:
+                result.append(_ticket_to_dict(docs_root, path, fm))
+        _json_out(result)
+        return
 
     for section in ("planned", "draft"):
         items = sections[section]
@@ -203,7 +284,7 @@ def cmd_backlog(args) -> None:
         else:
             print(f"  {'ID':<16} {'Type':<11} {'Priority':<11} Title")
             print(f"  {'-' * 60}")
-            for fm in items:
+            for path, fm in items:
                 print(f"  {fm['id']:<16} {fm['type']:<11} {fm['priority']:<11} {fm['title']}")
         print()
 
@@ -213,6 +294,11 @@ def cmd_show(args) -> None:
     _require_initialized(docs_root)
 
     path, fm, body = _require_ticket(docs_root, args.ticket_id)
+
+    if getattr(args, "json", False):
+        _json_out(_ticket_to_dict(docs_root, path, fm, body=body))
+        return
+
     eff_status = parser.effective_status(docs_root, fm)
 
     print(f"ID:        {fm['id']}")
@@ -515,6 +601,19 @@ def cmd_blocker_list(args) -> None:
     _require_initialized(docs_root)
 
     path, fm, body = _require_ticket(docs_root, args.ticket_id)
+
+    if getattr(args, "json", False):
+        details = parser.get_blocker_details(docs_root, fm)
+        _json_out({
+            "id": fm["id"],
+            "title": fm["title"],
+            "blockers": [
+                {"id": d["id"], "status": d["status"], "title": d["title"], "resolved": d["resolved"]}
+                for d in details
+            ],
+        })
+        return
+
     print(f"{fm['id']}: {fm['title']}")
     print()
 
@@ -673,12 +772,14 @@ def cmd_todo(args) -> None:
     list_todos = getattr(args, "list", False)
     interactive = getattr(args, "interactive", False)
 
+    use_json = getattr(args, "json", False)
+
     if add_text:
-        _todo_add(todo_path, add_text)
+        _todo_add(todo_path, add_text, use_json=use_json)
     elif rm_id is not None:
-        _todo_rm(todo_path, rm_id)
+        _todo_rm(todo_path, rm_id, use_json=use_json)
     elif list_todos:
-        _todo_list(todo_path)
+        _todo_list(todo_path, use_json=use_json)
     elif interactive:
         _todo_interactive(todo_path)
     else:
@@ -713,15 +814,18 @@ def _todo_next_id(items: list[tuple[int, str]]) -> int:
     return max(item_id for item_id, _ in items) + 1
 
 
-def _todo_add(todo_path: Path, text: str) -> None:
+def _todo_add(todo_path: Path, text: str, *, use_json: bool = False) -> None:
     items = _todo_parse(todo_path)
     new_id = _todo_next_id(items)
     items.append((new_id, text))
     _todo_write(todo_path, items)
-    print(f"({new_id}) {text}")
+    if use_json:
+        _json_out({"id": new_id, "text": text})
+    else:
+        print(f"({new_id}) {text}")
 
 
-def _todo_rm(todo_path: Path, item_id: int) -> None:
+def _todo_rm(todo_path: Path, item_id: int, *, use_json: bool = False) -> None:
     items = _todo_parse(todo_path)
     matching = [(i, t) for i, t in items if i == item_id]
     if not matching:
@@ -730,11 +834,17 @@ def _todo_rm(todo_path: Path, item_id: int) -> None:
     removed_text = matching[0][1]
     items = [(i, t) for i, t in items if i != item_id]
     _todo_write(todo_path, items)
-    print(f"Removed ({item_id}): {removed_text}")
+    if use_json:
+        _json_out({"id": item_id, "text": removed_text, "removed": True})
+    else:
+        print(f"Removed ({item_id}): {removed_text}")
 
 
-def _todo_list(todo_path: Path) -> None:
+def _todo_list(todo_path: Path, *, use_json: bool = False) -> None:
     items = _todo_parse(todo_path)
+    if use_json:
+        _json_out([{"id": item_id, "text": text} for item_id, text in items])
+        return
     if not items:
         print("TODO: empty")
         return
@@ -764,6 +874,67 @@ def _todo_interactive(todo_path: Path) -> None:
         print()
     if count:
         print(f"Added {count} item(s).")
+
+
+def cmd_project(args) -> None:
+    docs_root = _resolve_docs_root(args)
+    _require_initialized(docs_root)
+
+    use_json = getattr(args, "json", False)
+
+    tickets = parser.load_all_tickets(docs_root, include_archive=True)
+
+    by_status: dict[str, int] = {}
+    by_type: dict[str, int] = {}
+    for path, fm, body in tickets:
+        eff = parser.effective_status(docs_root, fm)
+        by_status[eff] = by_status.get(eff, 0) + 1
+        t = fm.get("type", "unknown")
+        by_type[t] = by_type.get(t, 0) + 1
+
+    # Discover custom types from templates
+    templates_dir = _project_templates(docs_root)
+    valid_types = sorted(parser.TYPE_PREFIXES.keys())
+    if templates_dir.exists():
+        for tmpl in templates_dir.glob("*.md"):
+            t = tmpl.stem
+            if t not in valid_types:
+                valid_types.append(t)
+        valid_types = sorted(valid_types)
+
+    data = {
+        "llpm_root": str(docs_root),
+        "tickets_dir": str(docs_root / "tickets"),
+        "archive_dir": str(docs_root / "tickets" / "archive"),
+        "valid_statuses": sorted(parser.VALID_STATUSES),
+        "resolved_statuses": sorted(parser.RESOLVED_STATUSES),
+        "valid_types": valid_types,
+        "valid_priorities": sorted(parser.VALID_PRIORITIES),
+        "valid_efforts": sorted(parser.VALID_EFFORTS),
+        "counts": {
+            "total": len(tickets),
+            "by_status": by_status,
+            "by_type": by_type,
+        },
+    }
+
+    if use_json:
+        _json_out(data)
+        return
+
+    # Text output
+    print(f"LLPM Root:    {docs_root}")
+    print(f"Tickets:      {docs_root / 'tickets'}")
+    print(f"Archive:      {docs_root / 'tickets' / 'archive'}")
+    print(f"Total:        {len(tickets)}")
+    print()
+    print("By status:")
+    for s, count in sorted(by_status.items()):
+        print(f"  {s:<15} {count}")
+    print()
+    print("By type:")
+    for t, count in sorted(by_type.items()):
+        print(f"  {t:<15} {count}")
 
 
 def cmd_skills(args) -> None:
