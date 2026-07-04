@@ -2,7 +2,7 @@
 id: FEAT-001
 type: feature
 title: TicketStore protocol + LocalDirStore extraction
-status: in-progress
+status: review
 priority: high
 effort: medium
 parent: EPIC-001
