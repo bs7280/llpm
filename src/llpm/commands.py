@@ -12,6 +12,7 @@ from importlib import resources as importlib_resources
 from pathlib import Path
 
 from . import parser
+from .store import LocalDirStore, TicketStore
 
 
 # -- Helpers --
@@ -73,6 +74,14 @@ def _project_templates(docs_root: Path) -> Path:
     return docs_root / "templates"
 
 
+def _make_store(docs_root: Path) -> TicketStore:
+    """Construct the ticket store for a given docs root.
+
+    Built once per command dispatch; all ticket I/O flows through it.
+    """
+    return LocalDirStore(docs_root)
+
+
 def _require_initialized(docs_root: Path) -> None:
     """Error and exit if the project isn't initialized."""
     if not (docs_root / "tickets").exists():
@@ -80,14 +89,13 @@ def _require_initialized(docs_root: Path) -> None:
         raise SystemExit(1)
 
 
-def _require_ticket(docs_root: Path, ticket_id: str) -> tuple[Path, dict, str]:
+def _require_ticket(store: TicketStore, ticket_id: str) -> tuple[Path, dict, str]:
     """Find and parse a ticket, or exit with error."""
-    path = parser.find_ticket_by_id(docs_root, ticket_id)
-    if path is None:
+    result = store.read(ticket_id)
+    if result is None:
         print(f"Error: Ticket '{ticket_id}' not found.", file=sys.stderr)
         raise SystemExit(1)
-    fm, body = parser.parse_document(path)
-    return path, fm, body
+    return result
 
 
 def _ticket_to_dict(docs_root: Path, path: Path, fm: dict, body: str | None = None) -> dict:
@@ -173,11 +181,12 @@ def cmd_init(args) -> None:
 def cmd_list(args) -> None:
     docs_root = _resolve_docs_root(args)
     _require_initialized(docs_root)
+    store = _make_store(docs_root)
 
     include_archived = getattr(args, "include_archived", False)
     use_json = getattr(args, "json", False)
 
-    tickets = parser.load_all_tickets(docs_root, include_archive=include_archived)
+    tickets = parser.load_all_tickets(store, include_archive=include_archived)
     if not tickets:
         if use_json:
             _json_out([])
@@ -192,7 +201,7 @@ def cmd_list(args) -> None:
 
     filtered = []
     for path, fm, body in tickets:
-        eff_status = parser.effective_status(docs_root, fm)
+        eff_status = parser.effective_status(store, fm)
 
         if status_filter and eff_status != status_filter:
             continue
@@ -223,14 +232,14 @@ def cmd_list(args) -> None:
 def cmd_board(args) -> None:
     docs_root = _resolve_docs_root(args)
     _require_initialized(docs_root)
+    store = _make_store(docs_root)
 
     use_json = getattr(args, "json", False)
-    tickets = parser.load_all_tickets(docs_root, include_archive=False)
-    board_statuses = {"blocked", "open", "in-progress", "review"}
+    tickets = parser.load_all_tickets(store, include_archive=False)
     columns = {"blocked": [], "open": [], "in-progress": [], "review": []}
 
     for path, fm, body in tickets:
-        eff_status = parser.effective_status(docs_root, fm)
+        eff_status = parser.effective_status(store, fm)
         if eff_status in columns:
             columns[eff_status].append((path, fm))
 
@@ -258,9 +267,10 @@ def cmd_board(args) -> None:
 def cmd_backlog(args) -> None:
     docs_root = _resolve_docs_root(args)
     _require_initialized(docs_root)
+    store = _make_store(docs_root)
 
     use_json = getattr(args, "json", False)
-    tickets = parser.load_all_tickets(docs_root, include_archive=False)
+    tickets = parser.load_all_tickets(store, include_archive=False)
     sections = {"planned": [], "draft": []}
 
     for path, fm, body in tickets:
@@ -292,14 +302,15 @@ def cmd_backlog(args) -> None:
 def cmd_show(args) -> None:
     docs_root = _resolve_docs_root(args)
     _require_initialized(docs_root)
+    store = _make_store(docs_root)
 
-    path, fm, body = _require_ticket(docs_root, args.ticket_id)
+    path, fm, body = _require_ticket(store, args.ticket_id)
 
     if getattr(args, "json", False):
         _json_out(_ticket_to_dict(docs_root, path, fm, body=body))
         return
 
-    eff_status = parser.effective_status(docs_root, fm)
+    eff_status = parser.effective_status(store, fm)
 
     print(f"ID:        {fm['id']}")
     print(f"Type:      {fm['type']}")
@@ -315,7 +326,7 @@ def cmd_show(args) -> None:
     print(f"Parent:    {fm.get('parent') or '-'}")
 
     # Derived children
-    children = parser.get_children(docs_root, fm["id"])
+    children = parser.get_children(store, fm["id"])
     if children:
         child_ids = ", ".join(c["id"] for c in children)
         print(f"Children:  {child_ids} (derived)")
@@ -325,7 +336,7 @@ def cmd_show(args) -> None:
     # Blockers with details
     blockers = fm.get("blockers") or []
     if blockers:
-        details = parser.get_blocker_details(docs_root, fm)
+        details = parser.get_blocker_details(store, fm)
         parts = []
         for d in details:
             tag = "[RESOLVED]" if d["resolved"] else "[BLOCKING]"
@@ -348,22 +359,22 @@ def cmd_show(args) -> None:
 def cmd_create(args) -> None:
     docs_root = _resolve_docs_root(args)
     _require_initialized(docs_root)
+    store = _make_store(docs_root)
 
     ticket_type = args.ticket_type
     title = args.title
 
     # Read template from project templates dir
     template_path = _project_templates(docs_root) / f"{ticket_type}.md"
-    if not template_path.exists():
+    template_text = store.read_blob(f"templates/{ticket_type}.md")
+    if template_text is None:
         print(f"Error: No template found for type '{ticket_type}' at {template_path}", file=sys.stderr)
         raise SystemExit(1)
-
-    template_text = template_path.read_text(encoding="utf-8")
 
     # Validate parent if specified
     parent_id = getattr(args, "parent", None)
     if parent_id:
-        if parser.find_ticket_by_id(docs_root, parent_id) is None:
+        if not store.exists(parent_id):
             print(f"Error: Parent ticket '{parent_id}' not found.", file=sys.stderr)
             raise SystemExit(1)
 
@@ -377,10 +388,9 @@ def cmd_create(args) -> None:
     # Atomic create with O_EXCL retry
     max_retries = 3
     for attempt in range(max_retries):
-        ticket_id = parser.next_id(docs_root, ticket_type)
+        ticket_id = parser.next_id(store, ticket_type)
         slug = _slugify(title)
         filename = f"{ticket_id}_{slug}.md"
-        filepath = docs_root / "tickets" / filename
 
         # String substitution on template
         content = template_text
@@ -439,9 +449,7 @@ def cmd_create(args) -> None:
 
         # Atomic file creation
         try:
-            fd = os.open(str(filepath), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(content)
+            filepath = store.create_exclusive(filename, content)
             print(f"Created {ticket_id}: {title}")
             print(f"File: {filepath}")
             return
@@ -455,8 +463,9 @@ def cmd_create(args) -> None:
 def cmd_status(args) -> None:
     docs_root = _resolve_docs_root(args)
     _require_initialized(docs_root)
+    store = _make_store(docs_root)
 
-    path, fm, body = _require_ticket(docs_root, args.ticket_id)
+    path, fm, body = _require_ticket(store, args.ticket_id)
     old_status = fm["status"]
     new_status = args.new_status
 
@@ -466,15 +475,16 @@ def cmd_status(args) -> None:
     if new_status == "complete" and not fm.get("completed"):
         fm["completed"] = _today()
 
-    parser.write_document(path, fm, body)
+    store.write(path, fm, body)
     print(f"{fm['id']}: {old_status} -> {new_status}")
 
 
 def cmd_set(args) -> None:
     docs_root = _resolve_docs_root(args)
     _require_initialized(docs_root)
+    store = _make_store(docs_root)
 
-    path, fm, body = _require_ticket(docs_root, args.ticket_id)
+    path, fm, body = _require_ticket(store, args.ticket_id)
 
     # Restricted fields
     FORBIDDEN = {"id", "type", "created", "updated", "completed"}
@@ -533,7 +543,7 @@ def cmd_set(args) -> None:
 
         # Validate parent exists
         if field == "parent" and value is not None:
-            if parser.find_ticket_by_id(docs_root, value) is None:
+            if not store.exists(value):
                 print(f"Error: Parent ticket '{value}' not found.", file=sys.stderr)
                 raise SystemExit(1)
 
@@ -546,18 +556,19 @@ def cmd_set(args) -> None:
         print(f"{fm['id']}: {field} = {value} (was {old})")
 
     fm["updated"] = _today()
-    parser.write_document(path, fm, body)
+    store.write(path, fm, body)
 
 
 def cmd_blocker_add(args) -> None:
     docs_root = _resolve_docs_root(args)
     _require_initialized(docs_root)
+    store = _make_store(docs_root)
 
-    path, fm, body = _require_ticket(docs_root, args.ticket_id)
+    path, fm, body = _require_ticket(store, args.ticket_id)
     blocker_id = args.blocked_by
 
     # Validate blocker exists
-    if parser.find_ticket_by_id(docs_root, blocker_id) is None:
+    if not store.exists(blocker_id):
         print(f"Error: Ticket '{blocker_id}' not found.", file=sys.stderr)
         raise SystemExit(1)
 
@@ -571,15 +582,16 @@ def cmd_blocker_add(args) -> None:
     blockers.append(blocker_id.upper())
     fm["blockers"] = blockers
     fm["updated"] = _today()
-    parser.write_document(path, fm, body)
+    store.write(path, fm, body)
     print(f"{fm['id']}: now blocked by '{blocker_id}'")
 
 
 def cmd_blocker_rm(args) -> None:
     docs_root = _resolve_docs_root(args)
     _require_initialized(docs_root)
+    store = _make_store(docs_root)
 
-    path, fm, body = _require_ticket(docs_root, args.ticket_id)
+    path, fm, body = _require_ticket(store, args.ticket_id)
     blocker_id = args.blocked_by
 
     blockers = fm.get("blockers") or []
@@ -592,18 +604,19 @@ def cmd_blocker_rm(args) -> None:
 
     fm["blockers"] = [b for b in blockers if b.upper() != upper_id]
     fm["updated"] = _today()
-    parser.write_document(path, fm, body)
+    store.write(path, fm, body)
     print(f"{fm['id']}: removed blocker '{blocker_id}'")
 
 
 def cmd_blocker_list(args) -> None:
     docs_root = _resolve_docs_root(args)
     _require_initialized(docs_root)
+    store = _make_store(docs_root)
 
-    path, fm, body = _require_ticket(docs_root, args.ticket_id)
+    path, fm, body = _require_ticket(store, args.ticket_id)
 
     if getattr(args, "json", False):
-        details = parser.get_blocker_details(docs_root, fm)
+        details = parser.get_blocker_details(store, fm)
         _json_out({
             "id": fm["id"],
             "title": fm["title"],
@@ -622,7 +635,7 @@ def cmd_blocker_list(args) -> None:
         print("No blockers.")
         return
 
-    details = parser.get_blocker_details(docs_root, fm)
+    details = parser.get_blocker_details(store, fm)
     print("Blockers:")
     unresolved = 0
     for d in details:
@@ -641,6 +654,7 @@ def cmd_blocker_list(args) -> None:
 def cmd_archive(args) -> None:
     docs_root = _resolve_docs_root(args)
     _require_initialized(docs_root)
+    store = _make_store(docs_root)
 
     archive_dir = docs_root / "tickets" / "archive"
     archive_dir.mkdir(exist_ok=True)
@@ -650,7 +664,7 @@ def cmd_archive(args) -> None:
 
     if archive_all:
         # Find all closed/complete non-archived tickets
-        tickets = parser.load_all_tickets(docs_root, include_archive=False)
+        tickets = parser.load_all_tickets(store, include_archive=False)
         to_archive = []
         for path, fm, body in tickets:
             if fm.get("status") in parser.RESOLVED_STATUSES:
@@ -671,32 +685,31 @@ def cmd_archive(args) -> None:
                 return
 
         for path, fm in to_archive:
-            dst = archive_dir / path.name
-            path.rename(dst)
+            store.archive(path)
         print(f"Archived {len(to_archive)} ticket(s).")
     else:
         ticket_id = args.ticket_id
-        path, fm, body = _require_ticket(docs_root, ticket_id)
+        path, fm, body = _require_ticket(store, ticket_id)
 
         if fm.get("status") not in parser.RESOLVED_STATUSES:
             print(f"Error: {fm['id']} is '{fm['status']}'. Only complete or closed tickets can be archived.", file=sys.stderr)
             raise SystemExit(1)
 
-        dst = archive_dir / path.name
-        path.rename(dst)
+        store.archive(path)
         print(f"Archived {fm['id']} -> tickets/archive/{path.name}")
 
 
 def cmd_delete(args) -> None:
     docs_root = _resolve_docs_root(args)
     _require_initialized(docs_root)
+    store = _make_store(docs_root)
 
-    path, fm, body = _require_ticket(docs_root, args.ticket_id)
+    path, fm, body = _require_ticket(store, args.ticket_id)
     ticket_id = fm["id"]
     auto_yes = getattr(args, "yes", False)
 
     # Find relationships
-    all_tickets = parser.load_all_tickets(docs_root, include_archive=False)
+    all_tickets = parser.load_all_tickets(store, include_archive=False)
     references = []
     children_of = []
 
@@ -754,17 +767,19 @@ def cmd_delete(args) -> None:
 
         if modified:
             t_fm["updated"] = _today()
-            parser.write_document(t_path, t_fm, t_body)
+            store.write(t_path, t_fm, t_body)
 
-    path.unlink()
+    store.delete(path)
     print(f"Deleted {ticket_id}.")
+
+
+TODO_BLOB = "TODO.md"
 
 
 def cmd_todo(args) -> None:
     docs_root = _resolve_docs_root(args)
     _require_initialized(docs_root)
-
-    todo_path = docs_root / "TODO.md"
+    store = _make_store(docs_root)
 
     # Determine action
     add_text = getattr(args, "add", None)
@@ -775,13 +790,13 @@ def cmd_todo(args) -> None:
     use_json = getattr(args, "json", False)
 
     if add_text:
-        _todo_add(todo_path, add_text, use_json=use_json)
+        _todo_add(store, add_text, use_json=use_json)
     elif rm_id is not None:
-        _todo_rm(todo_path, rm_id, use_json=use_json)
+        _todo_rm(store, rm_id, use_json=use_json)
     elif list_todos:
-        _todo_list(todo_path, use_json=use_json)
+        _todo_list(store, use_json=use_json)
     elif interactive:
-        _todo_interactive(todo_path)
+        _todo_interactive(store)
     else:
         # No flags -- show help hint
         print("Usage: llpm todo --add \"text\" | --rm <id> | --list | --interactive")
@@ -789,22 +804,23 @@ def cmd_todo(args) -> None:
         raise SystemExit(1)
 
 
-def _todo_parse(todo_path: Path) -> list[tuple[int, str]]:
+def _todo_parse(store: TicketStore) -> list[tuple[int, str]]:
     """Parse TODO.md, returning list of (id, text) tuples."""
-    if not todo_path.exists():
+    text = store.read_blob(TODO_BLOB)
+    if text is None:
         return []
     items = []
-    for line in todo_path.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         m = re.match(r"^- \((\d+)\) (.+)$", line)
         if m:
             items.append((int(m.group(1)), m.group(2)))
     return items
 
 
-def _todo_write(todo_path: Path, items: list[tuple[int, str]]) -> None:
+def _todo_write(store: TicketStore, items: list[tuple[int, str]]) -> None:
     """Write TODO.md from list of (id, text) tuples."""
     lines = [f"- ({item_id}) {text}" for item_id, text in items]
-    todo_path.write_text("\n".join(lines) + "\n" if lines else "", encoding="utf-8")
+    store.write_blob(TODO_BLOB, "\n".join(lines) + "\n" if lines else "")
 
 
 def _todo_next_id(items: list[tuple[int, str]]) -> int:
@@ -814,34 +830,34 @@ def _todo_next_id(items: list[tuple[int, str]]) -> int:
     return max(item_id for item_id, _ in items) + 1
 
 
-def _todo_add(todo_path: Path, text: str, *, use_json: bool = False) -> None:
-    items = _todo_parse(todo_path)
+def _todo_add(store: TicketStore, text: str, *, use_json: bool = False) -> None:
+    items = _todo_parse(store)
     new_id = _todo_next_id(items)
     items.append((new_id, text))
-    _todo_write(todo_path, items)
+    _todo_write(store, items)
     if use_json:
         _json_out({"id": new_id, "text": text})
     else:
         print(f"({new_id}) {text}")
 
 
-def _todo_rm(todo_path: Path, item_id: int, *, use_json: bool = False) -> None:
-    items = _todo_parse(todo_path)
+def _todo_rm(store: TicketStore, item_id: int, *, use_json: bool = False) -> None:
+    items = _todo_parse(store)
     matching = [(i, t) for i, t in items if i == item_id]
     if not matching:
         print(f"Error: TODO ({item_id}) not found.", file=sys.stderr)
         raise SystemExit(1)
     removed_text = matching[0][1]
     items = [(i, t) for i, t in items if i != item_id]
-    _todo_write(todo_path, items)
+    _todo_write(store, items)
     if use_json:
         _json_out({"id": item_id, "text": removed_text, "removed": True})
     else:
         print(f"Removed ({item_id}): {removed_text}")
 
 
-def _todo_list(todo_path: Path, *, use_json: bool = False) -> None:
-    items = _todo_parse(todo_path)
+def _todo_list(store: TicketStore, *, use_json: bool = False) -> None:
+    items = _todo_parse(store)
     if use_json:
         _json_out([{"id": item_id, "text": text} for item_id, text in items])
         return
@@ -853,7 +869,7 @@ def _todo_list(todo_path: Path, *, use_json: bool = False) -> None:
         print(f"  ({item_id}) {text}")
 
 
-def _todo_interactive(todo_path: Path) -> None:
+def _todo_interactive(store: TicketStore) -> None:
     print("TODO REPL (empty line or ctrl-d to exit):")
     count = 0
     try:
@@ -864,10 +880,10 @@ def _todo_interactive(todo_path: Path) -> None:
                 break
             if not line.strip():
                 break
-            items = _todo_parse(todo_path)
+            items = _todo_parse(store)
             new_id = _todo_next_id(items)
             items.append((new_id, line.strip()))
-            _todo_write(todo_path, items)
+            _todo_write(store, items)
             print(f"  ({new_id}) {line.strip()}")
             count += 1
     except KeyboardInterrupt:
