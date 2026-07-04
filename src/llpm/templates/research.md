@@ -11,6 +11,7 @@ created: "__DATE__"
 updated: "__DATE__"
 completed: null
 tags: []
+model_tier: standard  # heavy | standard | light
 ---
 
 ## Hypothesis
