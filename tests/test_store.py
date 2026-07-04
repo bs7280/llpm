@@ -240,7 +240,8 @@ def fake_project(tmp_path, monkeypatch):
     docs = tmp_path / "docs"
     (docs / "tickets").mkdir(parents=True)
     fake = FakeStore()
-    monkeypatch.setattr(commands, "_make_store", lambda docs_root: fake)
+    monkeypatch.setattr(commands, "_make_store", lambda docs_root, **kw: fake)
+    monkeypatch.setattr(commands, "_make_store_from_config", lambda cfg: fake)
     return docs, fake
 
 

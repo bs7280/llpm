@@ -7,12 +7,13 @@ import os
 import re
 import shutil
 import sys
+import tomllib
 from datetime import date
 from importlib import resources as importlib_resources
 from pathlib import Path
 
 from . import parser
-from .store import LocalDirStore, TicketStore
+from .store import LocalDirStore, MdTreeStore, TicketStore
 
 
 # -- Helpers --
@@ -49,14 +50,96 @@ def _read_body(args) -> str | None:
     return None
 
 
-def _resolve_docs_root(args) -> Path:
-    """Resolve docs root from args, env var, or default."""
+def _find_repo_config() -> dict | None:
+    """Walk upward from CWD to find .llpm/config.toml.
+
+    Returns a config dict on success (keys: ``kind``, plus kind-specific keys),
+    or None if no config file was found.
+
+    Supported kinds:
+    - ``"dir"``: local filesystem store; includes ``"docs_root"`` (Path).
+    - ``"mdtree"``: vault HTTP store; includes ``"base_url"`` (str) and
+      ``"repo_stem"`` (str).
+    """
+    current = Path.cwd()
+    while True:
+        config_path = current / ".llpm" / "config.toml"
+        if config_path.exists():
+            try:
+                with open(config_path, "rb") as f:
+                    data = tomllib.load(f)
+            except Exception as e:
+                print(f"Error: Failed to parse {config_path}: {e}", file=sys.stderr)
+                raise SystemExit(1)
+
+            store_section = data.get("store", {})
+            kind = store_section.get("kind", "dir")
+
+            if kind == "dir":
+                root_str = store_section.get("root", "./llpm")
+                docs_root = (current / root_str).resolve()
+                return {"kind": "dir", "docs_root": docs_root}
+
+            if kind == "mdtree":
+                base_url = store_section.get("url")
+                repo_stem = store_section.get("stem")
+                if not base_url or not repo_stem:
+                    print(
+                        f"Error: store.kind=mdtree in {config_path} requires "
+                        f"'url' and 'stem' fields.",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(1)
+                return {"kind": "mdtree", "base_url": base_url, "repo_stem": repo_stem}
+
+            print(
+                f"Error: Unknown store kind {kind!r} in {config_path} "
+                f"— supported: dir, mdtree",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
+        parent = current.parent
+        if parent == current:
+            # Reached filesystem root
+            return None
+        current = parent
+
+
+def _resolve_store_config(args) -> dict:
+    """Resolve the full store configuration.
+
+    Resolution order:
+    1. --docs-root flag  (forces kind=dir)
+    2. LLPM_DOCS_ROOT env var  (forces kind=dir)
+    3. In-repo .llpm/config.toml (walk upward from CWD)
+    4. Default: ./llpm dir, kind=dir (no error — _require_initialized handles it)
+    """
     if hasattr(args, "docs_root") and args.docs_root:
-        return Path(args.docs_root).resolve()
+        return {"kind": "dir", "docs_root": Path(args.docs_root).resolve()}
+
     env = os.environ.get("LLPM_DOCS_ROOT")
     if env:
-        return Path(env).resolve()
-    return Path("llpm").resolve()
+        return {"kind": "dir", "docs_root": Path(env).resolve()}
+
+    repo_config = _find_repo_config()
+    if repo_config is not None:
+        return repo_config
+
+    # Default: ./llpm dir
+    return {"kind": "dir", "docs_root": Path("llpm").resolve()}
+
+
+def _resolve_docs_root(args) -> Path:
+    """Resolve docs root from args, env var, in-repo config, or default.
+
+    For mdtree stores returns a sentinel path (not used for file I/O).
+    """
+    cfg = _resolve_store_config(args)
+    if cfg["kind"] == "dir":
+        return cfg["docs_root"]
+    # mdtree: return a non-existent sentinel path so callers don't crash
+    return Path("/dev/null/mdtree-sentinel")
 
 
 def _templates_source() -> Path:
@@ -74,16 +157,51 @@ def _project_templates(docs_root: Path) -> Path:
     return docs_root / "templates"
 
 
-def _make_store(docs_root: Path) -> TicketStore:
+def _make_store(docs_root: Path, kind: str = "dir", **kwargs) -> TicketStore:
     """Construct the ticket store for a given docs root.
 
     Built once per command dispatch; all ticket I/O flows through it.
+    For MdTreeStore pass ``kind="mdtree"`` with ``base_url`` and ``repo_stem``
+    kwargs (or use ``_make_store_from_config``).
     """
-    return LocalDirStore(docs_root)
+    if kind == "dir":
+        return LocalDirStore(docs_root)
+    if kind == "mdtree":
+        return MdTreeStore(base_url=kwargs["base_url"], repo_stem=kwargs["repo_stem"])
+    raise SystemExit(f"Unknown store kind: {kind!r}")
 
 
-def _require_initialized(docs_root: Path) -> None:
-    """Error and exit if the project isn't initialized."""
+def _make_store_from_config(cfg: dict) -> TicketStore:
+    """Construct a TicketStore from a resolved store-config dict."""
+    if cfg["kind"] == "dir":
+        return LocalDirStore(cfg["docs_root"])
+    if cfg["kind"] == "mdtree":
+        return MdTreeStore(base_url=cfg["base_url"], repo_stem=cfg["repo_stem"])
+    raise SystemExit(f"Unknown store kind: {cfg['kind']!r}")
+
+
+def _resolve_store_and_root(args) -> tuple[TicketStore, Path]:
+    """Resolve the store and docs_root from args in one call.
+
+    Returns ``(store, docs_root)`` where ``docs_root`` is a real path for
+    ``dir`` stores and a sentinel path for ``mdtree`` stores.  Also validates
+    that the project is initialized (or skips the check for mdtree).
+    """
+    cfg = _resolve_store_config(args)
+    docs_root: Path = cfg.get("docs_root", Path("/dev/null/mdtree-sentinel"))
+    store = _make_store_from_config(cfg)
+    _require_initialized(docs_root, store=store)
+    return store, docs_root
+
+
+def _require_initialized(docs_root: Path, store: TicketStore | None = None) -> None:
+    """Error and exit if the project isn't initialized.
+
+    For MdTreeStore pass the store as well — vault stores skip the local
+    filesystem check (the vault is always assumed to exist).
+    """
+    if isinstance(store, MdTreeStore):
+        return  # vault stores need no local init check
     if not (docs_root / "tickets").exists():
         print(f"Error: Not initialized. Run 'llpm init' first.", file=sys.stderr)
         raise SystemExit(1)
@@ -179,9 +297,7 @@ def cmd_init(args) -> None:
 
 
 def cmd_list(args) -> None:
-    docs_root = _resolve_docs_root(args)
-    _require_initialized(docs_root)
-    store = _make_store(docs_root)
+    store, docs_root = _resolve_store_and_root(args)
 
     include_archived = getattr(args, "include_archived", False)
     use_json = getattr(args, "json", False)
@@ -226,13 +342,13 @@ def cmd_list(args) -> None:
     print(f"{'ID':<16} {'Type':<11} {'Status':<15} {'Priority':<11} Title")
     print("-" * 75)
     for path, fm, eff_status in filtered:
-        print(f"{fm['id']:<16} {fm['type']:<11} {eff_status:<15} {fm['priority']:<11} {fm['title']}")
+        tier = fm.get("model_tier")
+        tier_chip = f" [{tier}]" if tier else ""
+        print(f"{fm['id']:<16} {fm['type']:<11} {eff_status:<15} {fm['priority']:<11} {fm['title']}{tier_chip}")
 
 
 def cmd_board(args) -> None:
-    docs_root = _resolve_docs_root(args)
-    _require_initialized(docs_root)
-    store = _make_store(docs_root)
+    store, docs_root = _resolve_store_and_root(args)
 
     use_json = getattr(args, "json", False)
     tickets = parser.load_all_tickets(store, include_archive=False)
@@ -265,9 +381,7 @@ def cmd_board(args) -> None:
 
 
 def cmd_backlog(args) -> None:
-    docs_root = _resolve_docs_root(args)
-    _require_initialized(docs_root)
-    store = _make_store(docs_root)
+    store, docs_root = _resolve_store_and_root(args)
 
     use_json = getattr(args, "json", False)
     tickets = parser.load_all_tickets(store, include_archive=False)
@@ -295,14 +409,14 @@ def cmd_backlog(args) -> None:
             print(f"  {'ID':<16} {'Type':<11} {'Priority':<11} Title")
             print(f"  {'-' * 60}")
             for path, fm in items:
-                print(f"  {fm['id']:<16} {fm['type']:<11} {fm['priority']:<11} {fm['title']}")
+                tier = fm.get("model_tier")
+                tier_chip = f" [{tier}]" if tier else ""
+                print(f"  {fm['id']:<16} {fm['type']:<11} {fm['priority']:<11} {fm['title']}{tier_chip}")
         print()
 
 
 def cmd_show(args) -> None:
-    docs_root = _resolve_docs_root(args)
-    _require_initialized(docs_root)
-    store = _make_store(docs_root)
+    store, docs_root = _resolve_store_and_root(args)
 
     path, fm, body = _require_ticket(store, args.ticket_id)
 
@@ -357,9 +471,7 @@ def cmd_show(args) -> None:
 
 
 def cmd_create(args) -> None:
-    docs_root = _resolve_docs_root(args)
-    _require_initialized(docs_root)
-    store = _make_store(docs_root)
+    store, docs_root = _resolve_store_and_root(args)
 
     ticket_type = args.ticket_type
     title = args.title
