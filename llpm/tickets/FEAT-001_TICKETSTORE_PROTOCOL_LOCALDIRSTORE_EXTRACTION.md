@@ -1,16 +1,18 @@
 ---
-id: "FEAT-001"
+id: FEAT-001
 type: feature
-title: "TicketStore protocol + LocalDirStore extraction"
-status: open  # draft | planned | open | in-progress | review | complete | closed | deferred (blocked is derived)
-priority: high  # low | medium | high
-effort: medium  # trivial | small | medium | large | xlarge
+title: TicketStore protocol + LocalDirStore extraction
+status: in-progress
+priority: high
+effort: medium
 parent: EPIC-001
 blockers: []
-created: "2026-07-04"
-updated: "2026-07-04"
+created: '2026-07-04'
+updated: '2026-07-04'
 completed: null
-tags: [task-fabric, tier-standard]
+tags:
+- task-fabric
+- tier-standard
 ---
 # Problem
 All ticket I/O is raw filesystem access spread across `parser.py` (core: `parse_document` :47, `write_document` :76, `find_tickets` :134, `find_ticket_by_id` :148, `load_all_tickets` :160, `next_id` :180) and `commands.py` (~25-30 call sites + direct ops: archive `rename` :675/:686, delete `unlink` :759, TODO.md :797/:807, template read :361, `O_EXCL` create :442-449). This blocks any non-local storage backend (vault-over-API, gitea-backed).
