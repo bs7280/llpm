@@ -2,19 +2,17 @@
 id: FEAT-002
 type: feature
 title: MdTreeStore — vault-backed store over markdown-tree-service
-status: planned
+status: review
 priority: medium
 effort: large
 parent: EPIC-001
-blockers:
-- FEAT-001
+blockers: []
 created: '2026-07-04'
 updated: '2026-07-04'
 completed: null
 tags:
 - task-fabric
 - tier-standard
-- blocked-external
 ---
 # Problem
 Vault-native repos keep their tickets in the agent-memory vault at `repos.<name>.llpm.*` instead of an in-repo `llpm/` dir. llpm needs a `TicketStore` implementation that talks to markdown-tree-service over HTTP.
