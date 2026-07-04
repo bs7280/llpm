@@ -2,14 +2,14 @@
 id: FEAT-001
 type: feature
 title: TicketStore protocol + LocalDirStore extraction
-status: review
+status: complete
 priority: high
 effort: medium
 parent: EPIC-001
 blockers: []
 created: '2026-07-04'
 updated: '2026-07-04'
-completed: null
+completed: '2026-07-04'
 tags:
 - task-fabric
 - tier-standard
