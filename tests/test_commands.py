@@ -456,3 +456,225 @@ class TestHelp:
         assert "llpm init" in out
         # Verbose should have more detailed output
         assert "Initialize LLPM" in out
+
+
+class TestStoreDiscovery:
+    """Tests for TASK-001: in-repo .llpm/config.toml discovery."""
+
+    def test_config_toml_dir_kind(self, tmp_path):
+        """_find_repo_config finds .llpm/config.toml and returns a dict with kind='dir'."""
+        # Set up a repo-like dir with .llpm/config.toml
+        repo = tmp_path / "myrepo"
+        repo.mkdir()
+        llpm_dir = repo / ".llpm"
+        llpm_dir.mkdir()
+        (llpm_dir / "config.toml").write_text(
+            '[store]\nkind = "dir"\nroot = "./llpm"\n', encoding="utf-8"
+        )
+
+        import os
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(repo)
+            result = commands._find_repo_config()
+        finally:
+            os.chdir(original_cwd)
+
+        assert result is not None
+        assert result["kind"] == "dir"
+        assert result["docs_root"] == (repo / "llpm").resolve()
+
+    def test_config_toml_custom_root(self, tmp_path):
+        """_find_repo_config respects a custom root path."""
+        repo = tmp_path / "myrepo"
+        repo.mkdir()
+        llpm_dir = repo / ".llpm"
+        llpm_dir.mkdir()
+        (llpm_dir / "config.toml").write_text(
+            '[store]\nkind = "dir"\nroot = "./custom/tickets-root"\n', encoding="utf-8"
+        )
+
+        import os
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(repo)
+            result = commands._find_repo_config()
+        finally:
+            os.chdir(original_cwd)
+
+        assert result is not None
+        assert result["docs_root"] == (repo / "custom" / "tickets-root").resolve()
+
+    def test_config_toml_unknown_kind_errors(self, tmp_path):
+        """_find_repo_config raises SystemExit for truly unknown store kinds."""
+        repo = tmp_path / "myrepo"
+        repo.mkdir()
+        llpm_dir = repo / ".llpm"
+        llpm_dir.mkdir()
+        (llpm_dir / "config.toml").write_text(
+            '[store]\nkind = "s3"\n',
+            encoding="utf-8",
+        )
+
+        import os
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(repo)
+            with pytest.raises(SystemExit):
+                commands._find_repo_config()
+        finally:
+            os.chdir(original_cwd)
+
+    def test_config_toml_walk_upward(self, tmp_path):
+        """_find_repo_config walks upward from a nested CWD to find config."""
+        repo = tmp_path / "myrepo"
+        repo.mkdir()
+        llpm_dir = repo / ".llpm"
+        llpm_dir.mkdir()
+        (llpm_dir / "config.toml").write_text(
+            '[store]\nkind = "dir"\nroot = "./llpm"\n', encoding="utf-8"
+        )
+        nested = repo / "src" / "sub"
+        nested.mkdir(parents=True)
+
+        import os
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(nested)
+            result = commands._find_repo_config()
+        finally:
+            os.chdir(original_cwd)
+
+        assert result is not None
+        # Should find the repo root's config and resolve root relative to it
+        assert result["kind"] == "dir"
+        assert result["docs_root"] == (repo / "llpm").resolve()
+
+    def test_no_config_toml_returns_none(self, tmp_path):
+        """_find_repo_config returns None when no .llpm/config.toml is found."""
+        # Use tmp_path with no .llpm dir
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+
+        import os
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(empty_dir)
+            result = commands._find_repo_config()
+        finally:
+            os.chdir(original_cwd)
+
+        assert result is None
+
+    def test_resolve_store_config_flag_overrides_toml(self, tmp_path):
+        """--docs-root flag takes priority over .llpm/config.toml."""
+        repo = tmp_path / "myrepo"
+        repo.mkdir()
+        llpm_dir = repo / ".llpm"
+        llpm_dir.mkdir()
+        (llpm_dir / "config.toml").write_text(
+            '[store]\nkind = "dir"\nroot = "./from_toml"\n', encoding="utf-8"
+        )
+        explicit_root = tmp_path / "explicit"
+
+        import os
+        import types
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(repo)
+            args = types.SimpleNamespace(docs_root=str(explicit_root))
+            cfg = commands._resolve_store_config(args)
+        finally:
+            os.chdir(original_cwd)
+
+        assert cfg["docs_root"] == explicit_root.resolve()
+        assert cfg["kind"] == "dir"
+
+    def test_resolve_store_config_env_overrides_toml(self, tmp_path, monkeypatch):
+        """LLPM_DOCS_ROOT env var takes priority over .llpm/config.toml."""
+        repo = tmp_path / "myrepo"
+        repo.mkdir()
+        llpm_dir = repo / ".llpm"
+        llpm_dir.mkdir()
+        (llpm_dir / "config.toml").write_text(
+            '[store]\nkind = "dir"\nroot = "./from_toml"\n', encoding="utf-8"
+        )
+        env_root = tmp_path / "from_env"
+        monkeypatch.setenv("LLPM_DOCS_ROOT", str(env_root))
+
+        import os
+        import types
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(repo)
+            args = types.SimpleNamespace(docs_root=None)
+            cfg = commands._resolve_store_config(args)
+        finally:
+            os.chdir(original_cwd)
+
+        assert cfg["docs_root"] == env_root.resolve()
+        assert cfg["kind"] == "dir"
+
+
+class TestModelTierDisplay:
+    """Tests for TASK-002: model_tier chip in ls/backlog output."""
+
+    def test_list_shows_model_tier_chip(self, docs_root, capsys):
+        """ls output includes [tier] chip when model_tier is set."""
+        # Add model_tier to TASK-001 fixture (has status=open so shows in list)
+        ticket_path = docs_root / "tickets" / "TASK-001_ADD_PYYAML.md"
+        content = ticket_path.read_text(encoding="utf-8")
+        # Insert model_tier after the tags line
+        content = content.replace("tags: [deps]", "tags: [deps]\nmodel_tier: heavy", 1)
+        ticket_path.write_text(content, encoding="utf-8")
+
+        run_cli("list", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "[heavy]" in out
+
+    def test_list_no_model_tier_no_chip(self, docs_root, capsys):
+        """ls output has no tier chip for tickets without model_tier."""
+        run_cli("list", docs_root=docs_root)
+        out = capsys.readouterr().out
+        # None of the fixture tickets have model_tier
+        assert "[heavy]" not in out
+        assert "[standard]" not in out
+        assert "[light]" not in out
+
+    def test_backlog_shows_model_tier_chip(self, docs_root, capsys):
+        """backlog output includes [tier] chip when model_tier is set on a planned ticket."""
+        # Create a planned ticket with model_tier
+        ticket_path = docs_root / "tickets" / "TASK-PLANNED_WITH_TIER.md"
+        ticket_path.write_text(
+            "---\n"
+            'id: "TASK-999"\n'
+            "type: task\n"
+            'title: "Tier test"\n'
+            "status: planned\n"
+            "priority: medium\n"
+            "effort: null\n"
+            "requires_human: false\n"
+            "parent: null\n"
+            "blockers: []\n"
+            'created: "2026-07-04"\n'
+            'updated: "2026-07-04"\n'
+            "completed: null\n"
+            "tags: []\n"
+            "model_tier: light\n"
+            "---\n\n## Description\n\nTest ticket.\n",
+            encoding="utf-8",
+        )
+
+        run_cli("backlog", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "[light]" in out
+
+    def test_templates_include_model_tier(self):
+        """All four bundled templates include model_tier field."""
+        from llpm.commands import _templates_source
+        from pathlib import Path
+
+        templates_dir = Path(str(_templates_source()))
+        for tmpl_name in ("task.md", "feature.md", "epic.md", "research.md"):
+            content = (templates_dir / tmpl_name).read_text(encoding="utf-8")
+            assert "model_tier:" in content, f"{tmpl_name} missing model_tier field"

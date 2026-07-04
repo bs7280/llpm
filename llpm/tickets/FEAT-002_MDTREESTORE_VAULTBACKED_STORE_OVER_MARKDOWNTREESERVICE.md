@@ -2,19 +2,17 @@
 id: FEAT-002
 type: feature
 title: MdTreeStore — vault-backed store over markdown-tree-service
-status: planned
+status: review
 priority: medium
 effort: large
 parent: EPIC-001
-blockers:
-- FEAT-001
+blockers: []
 created: '2026-07-04'
-updated: '2026-07-04'
+updated: '2026-07-05'
 completed: null
 tags:
 - task-fabric
 - tier-standard
-- blocked-external
 ---
 # Problem
 Vault-native repos keep their tickets in the agent-memory vault at `repos.<name>.llpm.*` instead of an in-repo `llpm/` dir. llpm needs a `TicketStore` implementation that talks to markdown-tree-service over HTTP.
@@ -38,6 +36,14 @@ Vault-native repos keep their tickets in the agent-memory vault at `repos.<name>
 # Acceptance Criteria
 - Same command matrix as the extraction ticket passes against a live or faked markdown-tree-service.
 - Integration test with a mock HTTP server (no network in CI).
+
+# Implementation Notes
+- `VaultRef` dataclass (frozen): `.name`/`.stem` return last dot-segment; `.parts` returns `("archive", id)` when archived, `(id,)` otherwise — satisfies `"archive" in ref.parts` used in `_ticket_to_dict`.
+- `MdTreeStore` uses stdlib `urllib` only (no new runtime deps). Errors are loud: 404 → None, 409 → `FileExistsError`, connection errors propagate.
+- `_TYPE_STEMS` maps type key → plural sub-stem (`task→tasks`, `feature→features`, etc.); `read()` tries all type sub-stems then falls back to `archive`.
+- `create_exclusive` parses frontmatter from the content string to extract `id`/`type` for vault stem construction.
+- `commands.py`: added `_find_repo_config()` (walk-up `.llpm/config.toml`), `_resolve_store_config()`, `_make_store_from_config()`, `_resolve_store_and_root()`. Commands updated to use `_resolve_store_and_root` instead of the old `_make_store(docs_root)` trio. `_require_initialized` skips for `MdTreeStore`. `FakeStore.fake_project` fixture patched to also mock `_make_store_from_config`.
+- 34 new tests in `tests/test_mdtreestore.py` covering VaultRef, all store methods, blob ops, and config.toml discovery. All 214 tests green.
 
 # References
 - BLOCKED EXTERNALLY on markdown-tree-service "write REST + create-exclusive" (that repo's llpm EPIC/FEAT filed 2026-07-04). Unblock signal: write endpoints live on https://agent-memory.home.lab (or dev instance).

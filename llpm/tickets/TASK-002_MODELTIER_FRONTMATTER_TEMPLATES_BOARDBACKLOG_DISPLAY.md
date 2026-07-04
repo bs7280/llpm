@@ -2,7 +2,7 @@
 id: TASK-002
 type: task
 title: 'model_tier frontmatter: templates + board/backlog display'
-status: planned
+status: complete
 priority: medium
 effort: small
 requires_human: false
@@ -10,7 +10,7 @@ parent: EPIC-001
 blockers: []
 created: '2026-07-04'
 updated: '2026-07-04'
-completed: null
+completed: '2026-07-04'
 tags:
 - task-fabric
 - tier-light
