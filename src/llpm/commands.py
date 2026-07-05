@@ -288,7 +288,15 @@ def _json_out(data) -> None:
 # -- Commands --
 
 def cmd_init(args) -> None:
-    docs_root = _resolve_docs_root(args)
+    cfg = _resolve_store_config(args)
+
+    # Vault stores need no local init — templates fall back to bundled.
+    if cfg["kind"] == "mdtree":
+        print("Vault store configured: no local init needed.")
+        print("Templates fall back to bundled; run 'llpm create' directly.")
+        return
+
+    docs_root: Path = cfg["docs_root"]
     tickets_dir = docs_root / "tickets"
 
     if tickets_dir.exists():
@@ -494,12 +502,18 @@ def cmd_create(args) -> None:
     ticket_type = args.ticket_type
     title = args.title
 
-    # Read template from project templates dir
-    template_path = _project_templates(docs_root) / f"{ticket_type}.md"
+    # Read template: store-side first (vault override or local project copy),
+    # then fall back to bundled templates.
     template_text = store.read_blob(f"templates/{ticket_type}.md")
     if template_text is None:
-        print(f"Error: No template found for type '{ticket_type}' at {template_path}", file=sys.stderr)
-        raise SystemExit(1)
+        # Bundled fallback — avoids requiring per-board template seeding for vault stores.
+        bundled_path = _templates_source() / f"{ticket_type}.md"
+        bundled_file = Path(str(bundled_path))
+        if bundled_file.exists():
+            template_text = bundled_file.read_text(encoding="utf-8")
+        else:
+            print(f"Error: No template found for type '{ticket_type}'.", file=sys.stderr)
+            raise SystemExit(1)
 
     # Validate parent if specified
     parent_id = getattr(args, "parent", None)
@@ -591,9 +605,7 @@ def cmd_create(args) -> None:
 
 
 def cmd_status(args) -> None:
-    docs_root = _resolve_docs_root(args)
-    _require_initialized(docs_root)
-    store = _make_store(docs_root)
+    store, docs_root = _resolve_store_and_root(args)
 
     path, fm, body = _require_ticket(store, args.ticket_id)
     old_status = fm["status"]
@@ -610,9 +622,7 @@ def cmd_status(args) -> None:
 
 
 def cmd_set(args) -> None:
-    docs_root = _resolve_docs_root(args)
-    _require_initialized(docs_root)
-    store = _make_store(docs_root)
+    store, docs_root = _resolve_store_and_root(args)
 
     path, fm, body = _require_ticket(store, args.ticket_id)
 
@@ -690,9 +700,7 @@ def cmd_set(args) -> None:
 
 
 def cmd_blocker_add(args) -> None:
-    docs_root = _resolve_docs_root(args)
-    _require_initialized(docs_root)
-    store = _make_store(docs_root)
+    store, docs_root = _resolve_store_and_root(args)
 
     path, fm, body = _require_ticket(store, args.ticket_id)
     blocker_id = args.blocked_by
@@ -717,9 +725,7 @@ def cmd_blocker_add(args) -> None:
 
 
 def cmd_blocker_rm(args) -> None:
-    docs_root = _resolve_docs_root(args)
-    _require_initialized(docs_root)
-    store = _make_store(docs_root)
+    store, docs_root = _resolve_store_and_root(args)
 
     path, fm, body = _require_ticket(store, args.ticket_id)
     blocker_id = args.blocked_by
@@ -739,9 +745,7 @@ def cmd_blocker_rm(args) -> None:
 
 
 def cmd_blocker_list(args) -> None:
-    docs_root = _resolve_docs_root(args)
-    _require_initialized(docs_root)
-    store = _make_store(docs_root)
+    store, docs_root = _resolve_store_and_root(args)
 
     path, fm, body = _require_ticket(store, args.ticket_id)
 
@@ -782,12 +786,7 @@ def cmd_blocker_list(args) -> None:
 
 
 def cmd_archive(args) -> None:
-    docs_root = _resolve_docs_root(args)
-    _require_initialized(docs_root)
-    store = _make_store(docs_root)
-
-    archive_dir = docs_root / "tickets" / "archive"
-    archive_dir.mkdir(exist_ok=True)
+    store, docs_root = _resolve_store_and_root(args)
 
     archive_all = getattr(args, "all", False)
     auto_yes = getattr(args, "yes", False)
@@ -830,9 +829,7 @@ def cmd_archive(args) -> None:
 
 
 def cmd_delete(args) -> None:
-    docs_root = _resolve_docs_root(args)
-    _require_initialized(docs_root)
-    store = _make_store(docs_root)
+    store, docs_root = _resolve_store_and_root(args)
 
     path, fm, body = _require_ticket(store, args.ticket_id)
     ticket_id = fm["id"]
@@ -907,9 +904,7 @@ TODO_BLOB = "TODO.md"
 
 
 def cmd_todo(args) -> None:
-    docs_root = _resolve_docs_root(args)
-    _require_initialized(docs_root)
-    store = _make_store(docs_root)
+    store, docs_root = _resolve_store_and_root(args)
 
     # Determine action
     add_text = getattr(args, "add", None)
@@ -1023,24 +1018,23 @@ def _todo_interactive(store: TicketStore) -> None:
 
 
 def cmd_project(args) -> None:
-    docs_root = _resolve_docs_root(args)
-    _require_initialized(docs_root)
+    store, docs_root = _resolve_store_and_root(args)
 
     use_json = getattr(args, "json", False)
 
-    tickets = parser.load_all_tickets(docs_root, include_archive=True)
+    tickets = parser.load_all_tickets(store, include_archive=True)
 
     by_status: dict[str, int] = {}
     by_type: dict[str, int] = {}
     for path, fm, body in tickets:
-        eff = parser.effective_status(docs_root, fm)
+        eff = parser.effective_status(store, fm)
         by_status[eff] = by_status.get(eff, 0) + 1
         t = fm.get("type", "unknown")
         by_type[t] = by_type.get(t, 0) + 1
 
-    # Discover custom types from templates
-    templates_dir = _project_templates(docs_root)
+    # Discover custom types from templates (local-dir stores only; vault uses bundled)
     valid_types = sorted(parser.TYPE_PREFIXES.keys())
+    templates_dir = _project_templates(docs_root)
     if templates_dir.exists():
         for tmpl in templates_dir.glob("*.md"):
             t = tmpl.stem
@@ -1048,10 +1042,15 @@ def cmd_project(args) -> None:
                 valid_types.append(t)
         valid_types = sorted(valid_types)
 
+    is_vault = isinstance(store, MdTreeStore)
+    root_label = store._ns if is_vault else str(docs_root)
+    tickets_label = f"{root_label}/tickets" if not is_vault else f"{root_label}.tasks|features|epics|research"
+    archive_label = f"{root_label}/tickets/archive" if not is_vault else f"{root_label}.archive"
+
     data = {
-        "llpm_root": str(docs_root),
-        "tickets_dir": str(docs_root / "tickets"),
-        "archive_dir": str(docs_root / "tickets" / "archive"),
+        "llpm_root": root_label,
+        "tickets_dir": tickets_label,
+        "archive_dir": archive_label,
         "valid_statuses": sorted(parser.VALID_STATUSES),
         "resolved_statuses": sorted(parser.RESOLVED_STATUSES),
         "valid_types": valid_types,
@@ -1069,9 +1068,9 @@ def cmd_project(args) -> None:
         return
 
     # Text output
-    print(f"LLPM Root:    {docs_root}")
-    print(f"Tickets:      {docs_root / 'tickets'}")
-    print(f"Archive:      {docs_root / 'tickets' / 'archive'}")
+    print(f"LLPM Root:    {root_label}")
+    print(f"Tickets:      {tickets_label}")
+    print(f"Archive:      {archive_label}")
     print(f"Total:        {len(tickets)}")
     print()
     print("By status:")
