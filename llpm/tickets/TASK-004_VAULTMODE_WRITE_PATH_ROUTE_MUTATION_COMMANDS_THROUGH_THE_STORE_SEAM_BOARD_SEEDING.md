@@ -1,20 +1,21 @@
 ---
-id: "TASK-004"
+id: TASK-004
 type: task
-title: "Vault-mode write path: route mutation commands through the store seam + board seeding"
-status: planned  # draft | planned | open | in-progress | review | complete | closed | deferred (blocked is derived)
-priority: high  # low | medium | high
-effort: medium  # trivial | small | medium | large | xlarge
+title: 'Vault-mode write path: route mutation commands through the store seam + board
+  seeding'
+status: review
+priority: high
+effort: medium
 requires_human: false
 parent: FEAT-002
 blockers: []
-created: "2026-07-05"
-updated: "2026-07-05"
+created: '2026-07-05'
+updated: '2026-07-05'
 completed: null
 tags:
 - store
 - infra
-model_tier: light  # heavy | standard | light
+model_tier: standard
 ---
 
 ## Description
@@ -72,3 +73,26 @@ Found while standing up the first consumer-repo board (claude-tools). Context an
 ordering: vault `area.homelab.agent-platform.task-fabric.rollout` § Status snapshot
 (2026-07-05 evening addendum). Cross-links: llpm TASK-003 (TLS trust, merged, `review`),
 mts TASK-002 (llpm-over-vault e2e), claude-tools board TASK-001 (TLS convention adoption).
+
+## Resolution (2026-07-05)
+
+Implemented by a standard-tier subagent (first dispatched ticket of the model-tier workflow);
+reviewed + verified by the planning session. All in `src/llpm/commands.py` +
+`tests/test_vault_commands.py` (new):
+
+- **Scope 1** — all nine mutation/info commands (`status`, `set`, `blocker add/rm/list`,
+  `archive`, `delete`, `todo`, `project`) swapped to `_resolve_store_and_root(args)`.
+  `cmd_archive` also dropped its local `archive_dir.mkdir` (redundant for LocalDirStore,
+  wrong for vault); `cmd_project` now reports the vault namespace instead of the sentinel
+  path and passes the store (not docs_root) to `load_all_tickets`/`effective_status`.
+- **Scope 2** — `cmd_create`: store templates first (vault `templates.*` notes act as
+  overrides), bundled fallback via `_templates_source()` when the store has none; unknown
+  type → generic error, no sentinel path leak. `cmd_init` in mdtree mode: prints "no local
+  init needed" and exits 0. The optional `write_blob` seeding init was skipped (fallback
+  covers the acceptance criterion).
+- **Scope 3** — 39 new vault-mode tests (FakeStore through `_resolve_store_and_root`);
+  suite: **261 passed** (222 pre-existing + 39 new).
+
+Decision on the hand-seeded `repos.claude-tools.llpm.templates.*` notes: **removed** after
+this merged — bundled fallback covers them, and per-board copies reintroduce the staleness
+bug class. Consumer-repo e2e round trip recorded in mts TASK-002.
