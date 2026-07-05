@@ -7,7 +7,7 @@ LLM Project Manager -- a CLI tool for stateless, markdown-based project manageme
 ```bash
 uv sync                    # install deps
 uv run llpm --help         # see all commands
-uv run pytest -x -v        # run tests (101 tests)
+uv run pytest -x -v        # run tests (261 tests)
 ```
 
 ## Project Structure
@@ -32,7 +32,7 @@ tests/
 - **CLI is the frontmatter gateway** -- use CLI for structured ops, edit bodies directly
 - **Derived fields**: `blocked` status and `children` are computed at read time, never stored
 - **Blockers must be real ticket IDs** -- no free-text blockers
-- **Templates live in the project** (`llpm/templates/`), copied from bundled on `init`
+- **Templates resolve store-first, then bundled** -- local-dir stores get copies on `init`; vault stores need no seeding (vault `templates.*` notes act as overrides when present)
 - **Atomic file creation** (`os.O_EXCL`) prevents ID collisions across parallel agents
 - **`set` cannot modify `status` or `blockers`** -- use dedicated `llpm status` and `llpm blocker` commands
 
@@ -67,7 +67,11 @@ llpm help [--verbose]                    # full CLI reference
 
 ## Docs Root Resolution
 
-`--docs-root` flag > `LLPM_DOCS_ROOT` env var > `./llpm/` default
+`--docs-root` flag > `LLPM_DOCS_ROOT` env var > `.llpm/config.toml` pointer > `./llpm/` default
+
+**This repo dogfoods the vault store**: its own board lives at `repos.llpm.llpm.*` in the
+agent-memory vault (`.llpm/config.toml` → kind=mdtree). There is no local `llpm/` dir; run
+`llpm board` from the repo root to see it.
 
 ## Claude Skills
 

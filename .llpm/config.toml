@@ -1,0 +1,4 @@
+[store]
+kind = "mdtree"
+url  = "https://agent-memory.home.lab"
+stem = "llpm"
