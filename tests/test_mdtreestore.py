@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from llpm.store import MdTreeStore, TicketStore, VaultRef
+from llpm.store import MdTreeStore, MdTreeStoreError, TicketStore, VaultRef
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +72,15 @@ def _response(body: str | bytes | dict, status: int = 200):
 def _http_error(code: int):
     import urllib.error
     return urllib.error.HTTPError(url="", code=code, msg="", hdrs=None, fp=None)
+
+
+def _ssl_error():
+    """A urllib.error.URLError wrapping an SSL cert-verification failure —
+    what stdlib urllib raises when the server cert isn't trusted."""
+    import ssl
+    import urllib.error
+    reason = ssl.SSLCertVerificationError("unable to get local issuer certificate")
+    return urllib.error.URLError(reason)
 
 
 TICKET_CONTENT = """\
@@ -297,6 +306,71 @@ class TestMdTreeStoreBlobs:
 
 
 # ---------------------------------------------------------------------------
+# TLS trust (TASK-003)
+# ---------------------------------------------------------------------------
+
+class TestMdTreeStoreTLS:
+    def test_ssl_verify_failure_raises_actionable_error(self, store):
+        # A cert-verify failure surfaces as MdTreeStoreError, not a raw traceback.
+        with patch("urllib.request.urlopen", side_effect=_ssl_error()):
+            with pytest.raises(MdTreeStoreError) as exc:
+                store.read("TASK-001")
+        msg = str(exc.value)
+        assert "SSL_CERT_FILE" in msg
+        assert "mkcert" in msg
+        assert "certs.home.lab" in msg
+
+    def test_no_ca_uses_default_context(self, store):
+        # Without a configured CA, urlopen is called with context=None so the
+        # stdlib default (SSL_CERT_FILE-aware) context is used.
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.return_value = _response(TICKET_CONTENT)
+            store.read("TASK-001")
+        _, kwargs = mock_open.call_args
+        assert kwargs.get("context") is None
+
+    def test_ca_config_builds_and_threads_context(self):
+        # A configured CA path builds an SSL context that is threaded into every
+        # request.
+        sentinel = MagicMock(name="ssl_ctx")
+        store = MdTreeStore("https://agent-memory.home.lab", "myrepo", ca="/tmp/rootCA.pem")
+        with patch("ssl.create_default_context", return_value=sentinel) as mk_ctx, \
+             patch("urllib.request.urlopen") as mock_open:
+            mock_open.return_value = _response(TICKET_CONTENT)
+            store.read("TASK-001")
+        mk_ctx.assert_called_once_with(cafile="/tmp/rootCA.pem")
+        _, kwargs = mock_open.call_args
+        assert kwargs.get("context") is sentinel
+
+    def test_bad_ca_path_raises_store_error(self):
+        store = MdTreeStore(
+            "https://agent-memory.home.lab", "myrepo", ca="/no/such/rootCA.pem"
+        )
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.return_value = _response(TICKET_CONTENT)
+            with pytest.raises(MdTreeStoreError) as exc:
+                store.read("TASK-001")
+        assert "ca" in str(exc.value).lower()
+
+    def test_http_error_still_propagates_as_404(self, store):
+        # The SSL handling must not swallow ordinary HTTP errors: 404 -> None.
+        with patch("urllib.request.urlopen", side_effect=_http_error(404)):
+            assert store.read("NOPE-999") is None
+
+    def test_unreachable_vault_raises_concise_error(self, store):
+        # A non-cert transport failure (down vault / wrong URL) becomes a
+        # concise MdTreeStoreError, not a raw traceback — and not the TLS hint.
+        import urllib.error
+        err = urllib.error.URLError(ConnectionRefusedError("Connection refused"))
+        with patch("urllib.request.urlopen", side_effect=err):
+            with pytest.raises(MdTreeStoreError) as exc:
+                store.read("TASK-001")
+        msg = str(exc.value)
+        assert "Could not reach the vault" in msg
+        assert "mkcert" not in msg  # not the TLS hint
+
+
+# ---------------------------------------------------------------------------
 # Config.toml discovery (TASK-001)
 # ---------------------------------------------------------------------------
 
@@ -349,6 +423,35 @@ class TestConfigTomlDiscovery:
         assert cfg["kind"] == "mdtree"
         assert cfg["base_url"] == "https://agent-memory.home.lab"
         assert cfg["repo_stem"] == "myrepo"
+        assert cfg["ca"] is None
+
+    def test_mdtree_config_parses_ca(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        config_dir = tmp_path / ".llpm"
+        config_dir.mkdir()
+        (config_dir / "config.toml").write_text(
+            '[store]\nkind = "mdtree"\nurl = "https://agent-memory.home.lab"\n'
+            'stem = "myrepo"\nca = "/opt/pki/rootCA.pem"\n'
+        )
+
+        from llpm.commands import _resolve_store_config
+        class Args: docs_root = None
+        cfg = _resolve_store_config(Args())
+        assert cfg["ca"] == "/opt/pki/rootCA.pem"
+
+    def test_mdtree_config_ca_relative_resolves_to_config_dir(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        config_dir = tmp_path / ".llpm"
+        config_dir.mkdir()
+        (config_dir / "config.toml").write_text(
+            '[store]\nkind = "mdtree"\nurl = "https://agent-memory.home.lab"\n'
+            'stem = "myrepo"\nca = "certs/rootCA.pem"\n'
+        )
+
+        from llpm.commands import _resolve_store_config
+        class Args: docs_root = None
+        cfg = _resolve_store_config(Args())
+        assert cfg["ca"] == str((tmp_path / "certs" / "rootCA.pem").resolve())
 
     def test_unknown_kind_exits(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

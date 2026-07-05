@@ -1,17 +1,19 @@
 ---
-id: "TASK-003"
+id: TASK-003
 type: task
-title: "MdTreeStore TLS trust: mkcert CA not trusted by Python on dev machines"
-status: open  # draft | planned | open | in-progress | review | complete | closed | deferred (blocked is derived)
-priority: medium  # low | medium | high
-effort: small  # trivial | small | medium | large | xlarge
+title: 'MdTreeStore TLS trust: mkcert CA not trusted by Python on dev machines'
+status: review
+priority: medium
+effort: small
 requires_human: false
 parent: FEAT-002
 blockers: []
-created: "2026-07-05"
-updated: "2026-07-05"
+created: '2026-07-05'
+updated: '2026-07-05'
 completed: null
-tags: [store, infra]
+tags:
+- store
+- infra
 model_tier: light
 ---
 ## Problem
@@ -50,3 +52,32 @@ was also the first successful llpm-over-vault read from a consumer repo (listed 
   exercise a TLS-verified client path, not localhost/http.
 
 Context: vault `area.homelab.agent-platform.task-fabric.rollout` § Status snapshot (2026-07-05).
+
+## Resolution (2026-07-05)
+All three scope items done in `src/llpm/store.py`, `src/llpm/commands.py`,
+`src/llpm/__main__.py`, `README.md`; tests in `tests/test_mdtreestore.py`.
+
+- **Item 1 — actionable errors.** Centralized every `urllib.request.urlopen`
+  call in `MdTreeStore` behind `_open()`, which threads the SSL context and
+  translates transport failures into `MdTreeStoreError` (new). A
+  `URLError`-wrapped `SSLCertVerificationError` → the TLS hint (`_tls_hint()`:
+  points at `SSL_CERT_FILE`, `mkcert -CAROOT`, `~/.zshrc`, certs.home.lab).
+  `HTTPError` (404/409) still propagates unchanged so `read`/`create_exclusive`
+  keep working. Also translated generic transport failures (DNS/refused/reset —
+  down vault / wrong URL) into a concise "Could not reach the vault at …"
+  message, since those hit the same 40-line-traceback problem. `__main__.py`
+  catches `MdTreeStoreError` and prints `Error: <msg>` with exit 1.
+- **Item 2 — `ca` config key.** `[store] ca = "…"` parsed in
+  `_find_repo_config` (relative → resolved against the config dir; `~`
+  expanded), threaded through `_make_store*` into `MdTreeStore(ca=…)`. Built
+  lazily via `ssl.create_default_context(cafile=ca)` in `_context()`; a bad `ca`
+  path → actionable `MdTreeStoreError`. `ca=None` → context `None` → stdlib
+  default (still honors `SSL_CERT_FILE`).
+- **Item 3 — docs.** README now has "Store configuration" + "TLS trust for the
+  vault store" sections (Option A `SSL_CERT_FILE` in `~/.zshrc`, Option B `ca`
+  key).
+
+Verified end-to-end (real urllib, not mocks): untrusted-cert host → clean TLS
+hint, no traceback; unresolvable host → concise "Could not reach the vault";
+valid `ca` against a trusted host → past TLS with no cert error. 222 tests pass
+(6 new: TLS/unreachable/ca-threading/bad-ca + 2 config-parse).

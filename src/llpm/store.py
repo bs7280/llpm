@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,6 +23,15 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from . import parser as _parser
+
+
+class MdTreeStoreError(Exception):
+    """A vault-store operation failed in a way worth surfacing to the user as a
+    clean, actionable message rather than a raw urllib traceback.
+
+    Currently raised for TLS trust problems (Python not trusting the homelab
+    mkcert root CA) and for a misconfigured ``[store] ca`` path.
+    """
 
 
 @runtime_checkable
@@ -222,30 +232,102 @@ class MdTreeStore:
     from ``read()``; 409 on ``create_exclusive`` raises ``FileExistsError``.
     """
 
-    def __init__(self, base_url: str, repo_stem: str) -> None:
+    def __init__(self, base_url: str, repo_stem: str, ca: str | None = None) -> None:
         """
         Args:
             base_url:  e.g. ``"https://agent-memory.home.lab"``
             repo_stem: the repo namespace, e.g. ``"llpm"`` giving
                        ``repos.llpm.llpm.*`` stems.
+            ca:        optional path to a CA bundle (PEM) used to verify the
+                       server certificate.  When set, it is threaded into every
+                       request via ``ssl.create_default_context(cafile=ca)`` so
+                       the repo works without per-shell env setup.  When None,
+                       the stdlib default context is used, which honors the
+                       ``SSL_CERT_FILE`` / ``SSL_CERT_DIR`` env vars.
         """
         self._base = base_url.rstrip("/")
         self._ns = f"repos.{repo_stem}.llpm"
+        self._ca = ca
+        self._ssl_ctx: ssl.SSLContext | None = None  # built lazily from _ca
 
     # -- Internal HTTP helpers ------------------------------------------------
 
     def _url(self, stem: str) -> str:
         return f"{self._base}/api/v1/notes/{urllib.parse.quote(stem, safe='')}"
 
+    def _context(self) -> ssl.SSLContext | None:
+        """SSL context for requests, or None to use the stdlib default (which
+        honors SSL_CERT_FILE/SSL_CERT_DIR).  Built once from ``self._ca``."""
+        if self._ca is None:
+            return None
+        if self._ssl_ctx is None:
+            try:
+                self._ssl_ctx = ssl.create_default_context(cafile=self._ca)
+            except OSError as e:
+                raise MdTreeStoreError(
+                    f"store.ca points at {self._ca!r}, which could not be loaded "
+                    f"({e}). Expected the homelab mkcert root CA — find its path "
+                    f"with `mkcert -CAROOT` (the file is rootCA.pem inside)."
+                ) from e
+        return self._ssl_ctx
+
+    def _open(self, req_or_url):
+        """``urllib.request.urlopen`` wrapper: threads the SSL context and turns
+        transport failures into an actionable ``MdTreeStoreError`` instead of a
+        40-line urllib traceback.  ``HTTPError`` (4xx/5xx) propagates unchanged
+        so callers keep handling 404/409 themselves."""
+        try:
+            return urllib.request.urlopen(req_or_url, context=self._context())
+        except urllib.error.HTTPError:
+            raise
+        except urllib.error.URLError as e:
+            if isinstance(e.reason, ssl.SSLCertVerificationError):
+                raise MdTreeStoreError(self._tls_hint()) from e
+            # DNS failure, connection refused/reset, timeout, etc. — the vault
+            # is unreachable, not a cert-trust problem.
+            raise MdTreeStoreError(
+                f"Could not reach the vault at {self._base}: {e.reason}. "
+                f"Check that the service is up and that store.url in "
+                f".llpm/config.toml is correct."
+            ) from e
+
+    def _tls_hint(self) -> str:
+        """Actionable message for a server-certificate verification failure."""
+        lines = [
+            f"TLS certificate verification failed talking to {self._base}.",
+            "",
+            "Python doesn't use the macOS system trust store, so the homelab's",
+            "mkcert root CA (which signs *.home.lab) isn't trusted by default.",
+            "Fix it with either:",
+            "",
+            "  * Point Python at the mkcert root CA for this shell (add to",
+            "    ~/.zshrc next to NODE_EXTRA_CA_CERTS to make it permanent):",
+            '      export SSL_CERT_FILE="$(mkcert -CAROOT)/rootCA.pem"',
+            "",
+            "  * Or set a CA path in .llpm/config.toml so no per-shell env is",
+            "    needed:",
+            "      [store]",
+            '      ca = "/path/to/rootCA.pem"   # `mkcert -CAROOT`/rootCA.pem',
+            "",
+            "The root CA is also downloadable from https://certs.home.lab",
+        ]
+        if self._ca:
+            lines += [
+                "",
+                f"(store.ca = {self._ca!r} is configured but verification still "
+                "failed — confirm it's the correct mkcert rootCA.pem.)",
+            ]
+        return "\n".join(lines)
+
     def _get_json(self, url: str) -> dict:
-        with urllib.request.urlopen(url) as r:
+        with self._open(url) as r:
             return json.loads(r.read())
 
     def _get_raw(self, stem: str) -> str | None:
         """Fetch raw markdown content for a stem. Returns None on 404."""
         url = self._url(stem) + "/raw"
         try:
-            with urllib.request.urlopen(url) as r:
+            with self._open(url) as r:
                 return r.read().decode("utf-8")
         except urllib.error.HTTPError as e:
             if e.code == 404:
@@ -261,7 +343,7 @@ class MdTreeStore:
             method="PUT",
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req):
+        with self._open(req):
             pass
 
     def _put_exclusive(self, stem: str, content: str) -> None:
@@ -275,7 +357,7 @@ class MdTreeStore:
             headers={"Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(req):
+            with self._open(req):
                 pass
         except urllib.error.HTTPError as e:
             if e.code == 409:
@@ -284,7 +366,7 @@ class MdTreeStore:
 
     def _delete(self, stem: str) -> None:
         req = urllib.request.Request(self._url(stem), method="DELETE")
-        with urllib.request.urlopen(req):
+        with self._open(req):
             pass
 
     def _move(self, stem: str, new_stem: str) -> None:
@@ -294,7 +376,7 @@ class MdTreeStore:
             + urllib.parse.quote(new_stem, safe="")
         )
         req = urllib.request.Request(url, method="POST", data=b"")
-        with urllib.request.urlopen(req):
+        with self._open(req):
             pass
 
     def _list_pattern(self, pattern: str) -> list[dict]:

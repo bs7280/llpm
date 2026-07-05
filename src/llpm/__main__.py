@@ -6,6 +6,7 @@ import sys
 
 from . import commands
 from .parser import VALID_EFFORTS, VALID_PRIORITIES
+from .store import MdTreeStoreError
 
 
 VALID_STATUSES_FOR_SET = ["draft", "planned", "open", "in-progress", "review", "complete", "closed", "deferred"]
@@ -282,6 +283,17 @@ def main(argv: list[str] | None = None) -> None:
         parser.print_help()
         raise SystemExit(1)
 
+    try:
+        _run(args, parser, subparsers)
+    except MdTreeStoreError as e:
+        # Vault store trust/config problem — show the actionable message, not a
+        # urllib traceback.
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1)
+
+
+def _run(args, parser, subparsers) -> None:
+    """Dispatch a parsed command to its handler."""
     dispatch = {
         "init": commands.cmd_init,
         "list": commands.cmd_list,

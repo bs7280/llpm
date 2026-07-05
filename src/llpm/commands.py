@@ -58,8 +58,8 @@ def _find_repo_config() -> dict | None:
 
     Supported kinds:
     - ``"dir"``: local filesystem store; includes ``"docs_root"`` (Path).
-    - ``"mdtree"``: vault HTTP store; includes ``"base_url"`` (str) and
-      ``"repo_stem"`` (str).
+    - ``"mdtree"``: vault HTTP store; includes ``"base_url"`` (str),
+      ``"repo_stem"`` (str), and ``"ca"`` (str path to a CA bundle, or None).
     """
     current = Path.cwd()
     while True:
@@ -90,7 +90,17 @@ def _find_repo_config() -> dict | None:
                         file=sys.stderr,
                     )
                     raise SystemExit(1)
-                return {"kind": "mdtree", "base_url": base_url, "repo_stem": repo_stem}
+                ca_str = store_section.get("ca")
+                ca = None
+                if ca_str:
+                    # Resolve relative to the config dir; expand ~ and normalize.
+                    ca = str((current / os.path.expanduser(ca_str)).resolve())
+                return {
+                    "kind": "mdtree",
+                    "base_url": base_url,
+                    "repo_stem": repo_stem,
+                    "ca": ca,
+                }
 
             print(
                 f"Error: Unknown store kind {kind!r} in {config_path} "
@@ -167,7 +177,11 @@ def _make_store(docs_root: Path, kind: str = "dir", **kwargs) -> TicketStore:
     if kind == "dir":
         return LocalDirStore(docs_root)
     if kind == "mdtree":
-        return MdTreeStore(base_url=kwargs["base_url"], repo_stem=kwargs["repo_stem"])
+        return MdTreeStore(
+            base_url=kwargs["base_url"],
+            repo_stem=kwargs["repo_stem"],
+            ca=kwargs.get("ca"),
+        )
     raise SystemExit(f"Unknown store kind: {kind!r}")
 
 
@@ -176,7 +190,11 @@ def _make_store_from_config(cfg: dict) -> TicketStore:
     if cfg["kind"] == "dir":
         return LocalDirStore(cfg["docs_root"])
     if cfg["kind"] == "mdtree":
-        return MdTreeStore(base_url=cfg["base_url"], repo_stem=cfg["repo_stem"])
+        return MdTreeStore(
+            base_url=cfg["base_url"],
+            repo_stem=cfg["repo_stem"],
+            ca=cfg.get("ca"),
+        )
     raise SystemExit(f"Unknown store kind: {cfg['kind']!r}")
 
 
