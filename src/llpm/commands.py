@@ -491,7 +491,8 @@ def cmd_show(args) -> None:
 
     tags = fm.get("tags") or []
     print(f"Tags:      {', '.join(tags) if tags else '-'}")
-    print(f"File:      {path.resolve()}")
+    location = path.resolve() if isinstance(path, Path) else path
+    print(f"File:      {location}")
     print()
     print(body)
 
