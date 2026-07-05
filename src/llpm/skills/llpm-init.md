@@ -1,40 +1,120 @@
-# Initialize LLPM in a Project
+# Onboard LLPM in a Project
 
-You are setting up LLPM (LLM Project Manager) in a project for the first time. LLPM is a CLI tool for stateless, markdown-based project management designed for LLM multi-agent workflows.
+You are setting up LLPM (LLM Project Manager) in a project. LLPM is a CLI tool for
+stateless, markdown-based project management designed for LLM multi-agent workflows.
+Follow every step — the permissions step (Step 2) and the CLAUDE.md step (Step 5) are what
+make future agent sessions run without friction; skipping them means permission prompts
+every few commands and agents that don't know the board exists.
 
-## Step 1: Initialize
+## Step 0: Pick the store
 
-```bash
-llpm init
+LLPM boards live in one of two stores:
+
+- **Vault store (default for this homelab):** tickets are notes in the agent-memory vault
+  at `repos.<stem>.llpm.*`, readable/writable by the `llpm` CLI over HTTPS, the
+  agent-memory MCP, and the marginalia board UI (`https://marginalia.home.lab/board/<stem>`).
+  No local ticket files in the repo at all.
+- **Local-dir store:** classic `llpm/tickets/` markdown files in the repo. Use only for
+  repos that must stay self-contained offline (or non-homelab machines).
+
+For the vault store, machine preconditions (one-time, usually already done):
+- `llpm` on PATH (`uv tool install --editable <llpm repo>` or equivalent)
+- The mkcert root CA trusted by Python: `SSL_CERT_FILE=".../mkcert/rootCA.pem"` exported in
+  **`~/.zshenv`** — NOT `.zshrc`, which is interactive-only and silently misses agent
+  harnesses, cron, and `zsh -c` shells. See vault note
+  `area.homelab.knowledge.claude-code-harness` § "TLS — the one gotcha".
+
+## Step 1: Wire the store
+
+**Vault store:** create `.llpm/config.toml` in the repo root (commit it):
+
+```toml
+[store]
+kind = "mdtree"
+url  = "https://agent-memory.home.lab"
+stem = "<repo-name>"   # MUST match the gitea repo name / repos.<name> vault note
 ```
 
-This creates:
-- `llpm/tickets/` -- where all ticket markdown files live
-- `llpm/tickets/archive/` -- for completed/closed tickets
-- `llpm/templates/` -- editable templates for each ticket type
+No `llpm init` needed — fresh vault boards work immediately (`create` falls back to
+bundled templates). Verify with `llpm project` (should print the vault namespace, not a
+local path).
 
-## Step 2: Understand the project and create initial tickets
+Also wire the vault side (via the agent-memory MCP if available):
+- Ensure the `repos.<stem>` note exists; set frontmatter `llpm: repos.<stem>.llpm`
+  (the store-pointer convention — how agents discover "where are this repo's tickets").
 
-Read the project's README, existing docs, and codebase structure to understand what's being built. Then create an initial set of tickets that capture the current state of work.
+**Local-dir store:** run `llpm init` (creates `llpm/tickets/`, `llpm/tickets/archive/`,
+`llpm/templates/`).
+
+**Migrating an existing local board to the vault:** PUT each ticket file to
+`https://agent-memory.home.lab/api/v1/notes/repos.<stem>.llpm.<bucket>.<ID>?if_absent=true`
+(JSON body `{"content": "<file text>"}`; bucket = tasks/features/epics/research from the ID
+prefix; TODO.md → `repos.<stem>.llpm.todo`), then delete the local `llpm/` dir and add the
+config. `if_absent` makes re-runs safe — an existing note is an error, never an overwrite.
+
+## Step 2: Claude Code permissions (kills the prompt spam)
+
+Two things cause permission prompts around llpm, and they need different fixes:
+
+**(a) Allowlist the CLI.** Add to the project's `.claude/settings.json` (committed — so
+every machine, box, and worktree gets it) or `.claude/settings.local.json` (this machine
+only). Merge into the existing file if one exists:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(llpm:*)"
+    ]
+  }
+}
+```
+
+**(b) Run llpm as SINGLE, PLAIN commands.** Compound shell commands bypass the allowlist
+entirely — no allow rule can ever match them, so they always prompt. This prompts every
+time, even with the rule above:
+
+```bash
+# BAD — chaining, redirects, and pipes defeat the allowlist:
+ls -la llpm/tickets/ 2>/dev/null; echo "==="; llpm project 2>&1 | head -30
+```
+
+```bash
+# GOOD — each is one bare command, matched by Bash(llpm:*):
+llpm project
+llpm board
+llpm list --json
+```
+
+Related rules that keep sessions prompt-free:
+- Never `ls`/`find`/`cat` ticket files — vault boards have no local files anyway. The CLI
+  is the interface: `llpm list`, `llpm show <ID>`.
+- Need machine-readable output? Every read command takes `--json`. Don't pipe to `head`.
+- llpm output is short; you never need to truncate or filter it in the shell.
+
+## Step 3: Understand the project and create initial tickets
+
+Read the project's README, existing docs, and codebase structure to understand what's
+being built. Then create an initial set of tickets that capture the current state of work.
 
 ### Ticket types and when to use them
 
-- **epic** -- Large initiative spanning multiple features. Use for major milestones or project phases.
+- **epic** — Large initiative spanning multiple features. Use for major milestones or
+  project phases.
   ```bash
-  llpm create epic "Authentication System" --priority high --body "## Objective\n\n..."
+  llpm create epic "Authentication System" --priority high
   ```
-
-- **feature** -- A specific capability to build. Has Problem/Solution/Files/Verification sections.
+- **feature** — A specific capability to build. Has Problem/Solution/Files/Verification
+  sections.
   ```bash
-  llpm create feature "JWT Login Flow" --parent EPIC-001 --body "## Problem\n\n..."
+  llpm create feature "JWT Login Flow" --parent EPIC-001
   ```
-
-- **task** -- A concrete unit of work. Has Description/Acceptance Criteria/Notes sections.
+- **task** — A concrete unit of work. Has Description/Acceptance Criteria/Notes sections.
   ```bash
   llpm create task "Install JWT library" --parent FEAT-001 --effort small
   ```
-
-- **research** -- Investigation or spike. Has Hypothesis/Methodology/Findings/Conclusion sections.
+- **research** — Investigation or spike. Has Hypothesis/Methodology/Findings/Conclusion
+  sections.
   ```bash
   llpm create research "Compare auth libraries" --parent FEAT-001
   ```
@@ -42,40 +122,38 @@ Read the project's README, existing docs, and codebase structure to understand w
 ### Tips for initial ticket creation
 
 1. Start with 1-3 epics that capture the major workstreams
-2. Break each epic into features (the "what")
-3. Break features into tasks (the "how")
-4. Use `--parent` to build the hierarchy
-5. Use `llpm blocker add` to capture dependencies between tickets
-6. Mark tasks that need human action with `--requires-human`
-7. Don't over-plan -- create tickets for known work, add more as you go
+2. Break each epic into features (the "what"), features into tasks (the "how")
+3. Use `--parent` to build the hierarchy; `llpm blocker add` for dependencies
+4. Mark tasks that need human action with `--requires-human`
+5. Set `model_tier` per ticket (`llpm set <ID> model_tier=light|standard|heavy`) — heavy
+   plans/reviews, cheaper tiers execute well-scoped tickets
+6. Don't over-plan — create tickets for known work, add more as you go
 
-## Step 3: Set up the workflow
+## Step 4: Set up the workflow
 
 ### For humans (TODO inbox)
 
-Humans capture ideas quickly without structuring them:
 ```bash
 llpm todo --add "rate limiting on API"
-llpm todo --add "fix 500 on /users"
-llpm todo -i  # REPL mode for rapid entry
+llpm todo -i    # REPL mode for rapid entry
 ```
 
 ### For agents (structured commands)
 
-Agents read TODOs and triage into proper tickets:
+Triage the inbox into tickets:
 ```bash
-llpm todo -l                           # read the inbox
-llpm create task "Fix /users 500" ...  # create proper ticket
-llpm todo --rm 2                       # clear triaged item
+llpm todo -l
+llpm create task "Fix /users 500" --parent FEAT-002
+llpm todo --rm 2
 ```
 
-Agents pick up work from the board:
+Pick up work from the board:
 ```bash
-llpm board                             # see what's available
-llpm show TASK-001                     # read the spec
-llpm status TASK-001 in-progress       # claim it
+llpm board
+llpm show TASK-001
+llpm status TASK-001 in-progress
 # ... do the work ...
-llpm status TASK-001 review            # mark for review
+llpm status TASK-001 review
 ```
 
 ### Status lifecycle
@@ -86,91 +164,91 @@ draft -> planned -> open -> in-progress -> review -> complete
                                        -> deferred (postponed)
 ```
 
-- `blocked` is derived -- a ticket with unresolved blockers automatically shows as blocked
-- `draft` = created without a body (placeholder/stub)
-- `planned` = spec'd but not yet approved for work
-- `review` = work done, needs verification
+- `blocked` is derived — unresolved blockers automatically show a ticket as blocked
+- `draft` = stub · `planned` = spec'd, not approved · `review` = done, needs verification
 
-## Step 4: Update CLAUDE.md
+## Step 5: Update CLAUDE.md
 
-**This step is critical.** Add an LLPM section to the project's `CLAUDE.md` so that every agent session knows how to use LLPM, what role it should play, and how to interact with the ticket system. Without this, agents will not know LLPM exists.
-
-Add the following to `CLAUDE.md`, adapting it to the project's specifics:
+**This step is critical.** Without it, agents will not know LLPM exists. Add the following
+to the project's `CLAUDE.md`, adapting the specifics:
 
 ```markdown
 ## Project Management (LLPM)
 
-This project uses LLPM for markdown-based task tracking. All tickets live in `llpm/tickets/`.
+This project uses LLPM for markdown-based task tracking. Tickets live in the agent-memory
+vault at `repos.<stem>.llpm.*` — the CLI reads/writes them via `.llpm/config.toml`; there
+are no local ticket files. Board UI: https://marginalia.home.lab/board/<stem>
+
+### Running LLPM
+
+`llpm` is a CLI tool installed globally on PATH. Run it directly — do NOT use `npx`,
+`pnpm exec`, `bunx`, or any package runner.
+
+**Always run llpm as a single, bare command** (`llpm board`, `llpm list --json`). Never
+chain it with `;`/`&&`, pipe it, or redirect it — compound commands bypass the permission
+allowlist and stall the session on a prompt. Use `--json` instead of piping to other tools,
+and use `llpm list`/`llpm show` instead of ls/cat on ticket paths.
 
 ### Quick Reference
 
-- `llpm board` -- see active work (kanban view)
-- `llpm backlog` -- see planned/draft tickets
-- `llpm show <ID>` -- read a ticket's full spec and body
-- `llpm status <ID> <status>` -- update ticket status
-- `llpm blocker add <ID> --blocked-by <ID>` -- add a dependency
-- `llpm help --verbose` -- full CLI reference
+- `llpm board` — active work (kanban) · `llpm backlog` — planned/draft
+- `llpm show <ID>` — full spec · `llpm status <ID> <status>` — update status
+- `llpm blocker add <ID> --blocked-by <ID>` — dependency
+- `llpm help --verbose` — full CLI reference
 
 ### Agent Roles
 
-Different agent sessions serve different roles. Follow the guidelines for your role:
+Different agent sessions serve different roles:
 
 #### Worker
-You implement tickets. Your workflow:
-1. Run `llpm board` to find open/unblocked tickets ready for work
-2. Run `llpm show <ID>` to read the full spec
-3. Run `llpm status <ID> in-progress` to claim the ticket
-4. Implement the work according to the ticket spec
-5. Run `llpm status <ID> review` when done (or `complete` if no review is needed)
+1. `llpm board` — find open/unblocked tickets
+2. `llpm show <ID>` — read the spec; `llpm status <ID> in-progress` — claim it
+3. Implement per spec; `llpm status <ID> review` when done (`complete` if no review needed)
 
-Do not create or modify ticket specs. If the spec is unclear or incomplete, set the ticket back to `planned` and add a note in the body explaining what's missing.
+Do not create or modify ticket specs. If a spec is unclear, set the ticket back to
+`planned` and add a body note explaining what's missing.
 
 #### Planner
-You research, design, and write ticket specs. Your workflow:
-1. Review `llpm backlog` for draft/planned tickets that need fleshing out
-2. Research the codebase, ask the user questions, and iterate on the design
-3. Write detailed specs in ticket bodies (Problem, Solution, Files, Acceptance Criteria)
-4. Break large tickets into subtasks with `llpm create task --parent <ID>`
-5. Set up dependencies with `llpm blocker add`
-6. Set tickets to `open` when the spec is ready for a worker to pick up
-
-You may also create new tickets from research or user conversations.
+1. Review `llpm backlog` for tickets needing specs
+2. Research the codebase; write detailed specs into ticket bodies
+3. Break large tickets down with `llpm create task --parent <ID>`; wire `llpm blocker add`
+4. Set tickets to `open` when ready for a worker
 
 #### Grooming / PM
-You manage the backlog and help the user prioritize. Your workflow:
-1. Review `llpm list` and `llpm board` for the current state of work
-2. Discuss priorities, scope, and feature ideas with the user
-3. Create and refine epics and features at a high level
-4. Triage `llpm todo -l` items into proper tickets or discard them
-5. Ensure ticket hierarchy makes sense (epics -> features -> tasks)
-6. Flag blocked or stale tickets and help resolve dependencies
-
-You focus on *what* to build and *why*, not implementation details.
+1. Review `llpm list` / `llpm board`; discuss priorities with the user
+2. Create/refine epics and features; triage `llpm todo -l` into tickets
+3. Keep the hierarchy sane; flag blocked or stale tickets
 
 #### Tester
-You verify completed work. Your workflow:
-1. Run `llpm list --status review` to find tickets awaiting verification
-2. Run `llpm show <ID>` to read the acceptance criteria
-3. Run tests, check the implementation, verify the criteria are met
-4. Run `llpm status <ID> complete` if it passes, or `llpm status <ID> in-progress` with a body note explaining what failed
+1. `llpm list --status review` — find tickets awaiting verification
+2. Verify acceptance criteria; `llpm status <ID> complete` on pass, or back to
+   `in-progress` with a body note on failure
 ```
+
+## Step 6: Verify
+
+```bash
+llpm project
+llpm board
+```
+
+`llpm project` must show the intended store (vault namespace or local path). For vault
+boards, also check `https://marginalia.home.lab/board/<stem>` — the repo appears on the
+multi-repo board as soon as it has one ticket.
 
 ## CLI Quick Reference
 
 ```bash
-llpm init                              # set up project
 llpm create <type> "title" [options]   # new ticket
-llpm list [--status X] [--type X]      # list tickets
+llpm list [--status X] [--type X]      # list tickets (--json for machine-readable)
 llpm board                             # kanban view
 llpm backlog                           # draft/planned tickets
 llpm show <ID>                         # full ticket details
 llpm status <ID> <status>              # change status
-llpm set <ID> field=value              # set fields
+llpm set <ID> field=value              # set fields (incl. model_tier)
 llpm blocker add <ID> --blocked-by <ID> # add dependency
-llpm blocker list <ID>                 # show blockers
 llpm archive <ID>                      # archive closed ticket
 llpm delete <ID>                       # delete (with cleanup)
-llpm todo --add "text"                 # quick capture
-llpm todo -l                           # list todos
+llpm todo --add "text" | -l | --rm <id> # TODO inbox
 llpm help --verbose                    # full reference
 ```
