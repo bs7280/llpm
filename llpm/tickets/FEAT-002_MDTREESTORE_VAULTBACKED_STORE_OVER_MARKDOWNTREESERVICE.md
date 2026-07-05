@@ -2,14 +2,14 @@
 id: FEAT-002
 type: feature
 title: MdTreeStore — vault-backed store over markdown-tree-service
-status: review
+status: complete
 priority: medium
 effort: large
 parent: EPIC-001
 blockers: []
 created: '2026-07-04'
 updated: '2026-07-05'
-completed: null
+completed: '2026-07-05'
 tags:
 - task-fabric
 - tier-standard
