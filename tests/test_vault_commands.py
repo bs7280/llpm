@@ -642,6 +642,39 @@ class TestVaultWaitsEffectiveStatus:
 
 
 # ---------------------------------------------------------------------------
+# cmd_after (FEAT-006)
+# ---------------------------------------------------------------------------
+
+class TestVaultAfter:
+    def test_after_add_round_trips(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed(fake, "TASK-101", "First task")
+        _seed(fake, "TASK-102", "Second task")
+
+        _run("after", "add", "TASK-102", "--after", "TASK-101", docs=docs)
+
+        out = capsys.readouterr().out
+        assert "now ordered after 'TASK-101'" in out
+        fm, _ = fake.active["TASK-102_SECOND_TASK.md"]
+        assert fm["after"] == ["TASK-101"]
+
+    def test_after_never_blocks_json(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed(fake, "TASK-101", "First task")
+        _seed(fake, "TASK-102", "Second task")
+        _run("after", "add", "TASK-102", "--after", "TASK-101", docs=docs)
+        capsys.readouterr()
+
+        _run("board", "--json", docs=docs)
+
+        import json
+        data = json.loads(capsys.readouterr().out)
+        t = next(t for t in data if t["id"] == "TASK-102")
+        assert t["effective_status"] == "open"
+        assert t["after"] == ["TASK-101"]
+
+
+# ---------------------------------------------------------------------------
 # --json derived fields flow through the store seam, not the sentinel path
 # ---------------------------------------------------------------------------
 

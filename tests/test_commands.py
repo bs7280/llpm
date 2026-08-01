@@ -458,6 +458,87 @@ class TestWaitsLocalStore:
         assert "No cross-board waits" in out
 
 
+class TestAfter:
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_after_add(self, mock_today, docs_root, capsys):
+        run_cli("after", "add", "FEAT-002", "--after", "RESEARCH-001", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "now ordered after 'RESEARCH-001'" in out
+        assert "never blocks" in out
+        fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
+        assert fm["after"] == ["RESEARCH-001"]
+        assert fm["updated"] == "2026-03-20"
+
+    def test_after_add_nonexistent(self, docs_root):
+        with pytest.raises(SystemExit):
+            run_cli("after", "add", "FEAT-002", "--after", "NOPE-999", docs_root=docs_root)
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_after_add_duplicate(self, mock_today, docs_root, capsys):
+        run_cli("after", "add", "FEAT-002", "--after", "RESEARCH-001", docs_root=docs_root)
+        run_cli("after", "add", "FEAT-002", "--after", "research-001", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "already ordered after" in out
+        fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
+        assert fm["after"] == ["RESEARCH-001"]
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_after_never_blocks(self, mock_today, docs_root, capsys):
+        # RESEARCH-001 is open (unresolved); a hard blocker would flip FEAT-002
+        # to blocked -- 'after' must not.
+        run_cli("after", "add", "FEAT-002", "--after", "RESEARCH-001", docs_root=docs_root)
+        capsys.readouterr()
+        run_cli("list", docs_root=docs_root)
+        out = capsys.readouterr().out
+        line = next(l for l in out.splitlines() if "FEAT-002" in l)
+        assert "in-progress" in line
+        assert "blocked" not in line
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_after_cycle_warns_but_adds(self, mock_today, docs_root, capsys):
+        run_cli("after", "add", "FEAT-002", "--after", "RESEARCH-001", docs_root=docs_root)
+        capsys.readouterr()
+        run_cli("after", "add", "RESEARCH-001", "--after", "FEAT-002", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "Warning: soft ordering cycle" in out
+        # Edge still added -- soft cycles are allowed
+        fm, _ = parser.parse_document(docs_root / "tickets" / "RESEARCH-001_YAML_LIBRARIES.md")
+        assert fm["after"] == ["FEAT-002"]
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_after_self_cycle_warns(self, mock_today, docs_root, capsys):
+        run_cli("after", "add", "FEAT-002", "--after", "FEAT-002", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "Warning: soft ordering cycle" in out
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_after_rm(self, mock_today, docs_root, capsys):
+        run_cli("after", "add", "FEAT-002", "--after", "RESEARCH-001", docs_root=docs_root)
+        run_cli("after", "rm", "FEAT-002", "--after", "RESEARCH-001", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "no longer ordered after" in out
+        fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
+        assert fm["after"] == []
+
+    def test_after_rm_not_present(self, docs_root):
+        with pytest.raises(SystemExit):
+            run_cli("after", "rm", "FEAT-002", "--after", "RESEARCH-001", docs_root=docs_root)
+
+    def test_cannot_set_after_via_set(self, docs_root, capsys):
+        with pytest.raises(SystemExit):
+            run_cli("set", "FEAT-002", "after=RESEARCH-001", docs_root=docs_root)
+        err = capsys.readouterr().err
+        assert "llpm after" in err
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_show_displays_after(self, mock_today, docs_root, capsys):
+        run_cli("after", "add", "FEAT-002", "--after", "RESEARCH-001", docs_root=docs_root)
+        capsys.readouterr()
+        run_cli("show", "FEAT-002", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "After:     RESEARCH-001 (soft)" in out
+
+
 class TestArchive:
     def test_archive_single(self, docs_root, capsys):
         run_cli("archive", "FEAT-001", docs_root=docs_root)

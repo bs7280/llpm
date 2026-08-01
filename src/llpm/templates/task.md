@@ -9,6 +9,7 @@ requires_human: false
 parent: null
 blockers: []
 waits_on: []  # cross-board deps: full vault stems (contribute to blocked)
+after: []  # soft precedence: intra-board IDs (ordering advice, never blocks)
 created: "__DATE__"
 updated: "__DATE__"
 completed: null

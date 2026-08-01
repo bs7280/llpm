@@ -266,6 +266,7 @@ def _ticket_to_dict(store: TicketStore, path: Path, fm: dict, body: str | None =
         ],
         "serves": fm.get("serves") or [],
         "waits_on": parser.get_waits_on_details(store, fm),
+        "after": fm.get("after") or [],
         "tags": fm.get("tags") or [],
         "requires_human": fm.get("requires_human", False),
         "created": fm.get("created"),
@@ -498,6 +499,11 @@ def cmd_show(args) -> None:
             parts.append(f"{d['stem']} ({label}) {_waits_tag(d)}")
         print(f"Waits on:  {', '.join(parts)}")
 
+    # Soft precedence -- ordering advice, never blocks
+    after = fm.get("after") or []
+    if after:
+        print(f"After:     {', '.join(after)} (soft)")
+
     # Goal references (epics/features)
     serves = fm.get("serves") or []
     if serves or fm.get("type") in parser.SERVES_TYPES:
@@ -652,6 +658,7 @@ def cmd_set(args) -> None:
         "blockers": "Use 'llpm blocker'.",
         "serves": "Use 'llpm serves'.",
         "waits_on": "Use 'llpm waits'.",
+        "after": "Use 'llpm after'.",
     }
 
     # Parse field=value pairs
@@ -776,6 +783,72 @@ def cmd_serves_rm(args) -> None:
     fm["updated"] = _today()
     store.write(path, fm, body)
     print(f"{fm['id']}: no longer serves '{goal_stem}'")
+
+
+def _after_reaches(store: TicketStore, start_id: str, target_id: str) -> bool:
+    """True if following `after` edges from start reaches target -- the
+    soft-cycle probe for 'llpm after add'."""
+    target = target_id.upper()
+    seen: set[str] = set()
+    frontier = [start_id.upper()]
+    while frontier:
+        current = frontier.pop()
+        if current == target:
+            return True
+        if current in seen:
+            continue
+        seen.add(current)
+        found = store.read(current)
+        if found is None:
+            continue
+        _, fm, _ = found
+        frontier.extend(a.upper() for a in fm.get("after") or [])
+    return False
+
+
+def cmd_after_add(args) -> None:
+    store, docs_root = _resolve_store_and_root(args)
+
+    path, fm, body = _require_ticket(store, args.ticket_id)
+    other_id = args.after
+
+    # Soft edge, but still a real ticket reference -- same rule as blockers.
+    if not store.exists(other_id):
+        print(f"Error: Ticket '{other_id}' not found.", file=sys.stderr)
+        raise SystemExit(1)
+
+    after = fm.get("after") or []
+    if any(a.upper() == other_id.upper() for a in after):
+        print(f"{fm['id']}: already ordered after '{other_id}'.")
+        return
+
+    # Soft cycles warn, never error: the edge is advice, not a constraint.
+    if _after_reaches(store, other_id, fm["id"]):
+        print(f"Warning: soft ordering cycle -- '{other_id}' already comes after {fm['id']}. Edge added anyway.")
+
+    after.append(other_id.upper())
+    fm["after"] = after
+    fm["updated"] = _today()
+    store.write(path, fm, body)
+    print(f"{fm['id']}: now ordered after '{other_id}' (soft -- never blocks)")
+
+
+def cmd_after_rm(args) -> None:
+    store, docs_root = _resolve_store_and_root(args)
+
+    path, fm, body = _require_ticket(store, args.ticket_id)
+    other_id = args.after
+
+    after = fm.get("after") or []
+    upper_id = other_id.upper()
+    if not any(a.upper() == upper_id for a in after):
+        print(f"Error: {fm['id']} is not ordered after '{other_id}'.", file=sys.stderr)
+        raise SystemExit(1)
+
+    fm["after"] = [a for a in after if a.upper() != upper_id]
+    fm["updated"] = _today()
+    store.write(path, fm, body)
+    print(f"{fm['id']}: no longer ordered after '{other_id}'")
 
 
 # Display tag for each waits_on resolution state ('ok' depends on resolved)

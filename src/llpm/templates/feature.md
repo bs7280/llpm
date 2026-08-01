@@ -8,6 +8,7 @@ effort: null  # trivial | small | medium | large | xlarge
 parent: null
 blockers: []
 waits_on: []  # cross-board deps: full vault stems (contribute to blocked)
+after: []  # soft precedence: intra-board IDs (ordering advice, never blocks)
 serves: []  # full vault stems of goal notes this serves (cross-repo)
 created: "__DATE__"
 updated: "__DATE__"

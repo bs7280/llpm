@@ -192,6 +192,28 @@ def _build_parser():
     p_bl.add_argument("ticket_id", help="Ticket ID to list blockers for")
     p_bl.add_argument("--json", action="store_true", help="Output as JSON object")
 
+    # -- after --
+    p_after = subparsers.add_parser(
+        "after",
+        description=(
+            "Manage soft-precedence edges. 'after' records ordering advice "
+            "(\"do this one after that one\") between tickets on this board. It "
+            "NEVER blocks -- it is a scheduler tie-break within the ready set and "
+            "a dashed edge in diagrams. Violating the order is allowed; cycles "
+            "warn but are not errors. For hard dependencies use 'llpm blocker'."
+        ),
+        help="Manage soft-precedence edges (add/rm) -- ordering advice, never blocks",
+    )
+    after_sub = p_after.add_subparsers(dest="after_action")
+
+    p_aa = after_sub.add_parser("add", help="Order a ticket after another (soft)")
+    p_aa.add_argument("ticket_id", help="The ticket that should come later")
+    p_aa.add_argument("--after", required=True, dest="after", help="The ticket ID that should come first")
+
+    p_ar = after_sub.add_parser("rm", help="Remove a soft-precedence edge")
+    p_ar.add_argument("ticket_id", help="The ticket to remove the edge from")
+    p_ar.add_argument("--after", required=True, dest="after", help="The ticket ID to remove from 'after'")
+
     # -- waits --
     p_waits = subparsers.add_parser(
         "waits",
@@ -387,6 +409,17 @@ def _run(args, parser, subparsers) -> None:
             subparsers.choices["serves"].print_help()
             raise SystemExit(1)
         serves_dispatch[args.serves_action](args)
+        return
+
+    if args.command == "after":
+        after_dispatch = {
+            "add": commands.cmd_after_add,
+            "rm": commands.cmd_after_rm,
+        }
+        if not args.after_action:
+            subparsers.choices["after"].print_help()
+            raise SystemExit(1)
+        after_dispatch[args.after_action](args)
         return
 
     if args.command == "waits":
