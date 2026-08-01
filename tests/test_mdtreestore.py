@@ -306,6 +306,84 @@ class TestMdTreeStoreBlobs:
 
 
 # ---------------------------------------------------------------------------
+# read_foreign — cross-board stem reads (FEAT-005)
+# ---------------------------------------------------------------------------
+
+FOREIGN_STEM = "repos.other.llpm.features.FEAT-010"
+
+
+class TestMdTreeStoreReadForeign:
+    def test_found(self, store):
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.return_value = _response(TICKET_CONTENT)
+            state, fm = store.read_foreign(FOREIGN_STEM)
+        assert state == "ok"
+        assert fm["id"] == "TASK-001"
+
+    def test_archived_target_followed(self, store):
+        def side_effect(req_or_url, *args, **kwargs):
+            url = req_or_url if isinstance(req_or_url, str) else req_or_url.full_url
+            if "archive" in url:
+                return _response(TICKET_CONTENT.replace("status: open", "status: complete"))
+            raise _http_error(404)
+
+        with patch("urllib.request.urlopen", side_effect=side_effect):
+            state, fm = store.read_foreign(FOREIGN_STEM)
+
+        assert state == "ok"
+        assert fm["status"] == "complete"
+
+    def test_missing(self, store):
+        with patch("urllib.request.urlopen", side_effect=_http_error(404)):
+            state, fm = store.read_foreign(FOREIGN_STEM)
+        assert state == "missing"
+        assert fm is None
+
+    def test_non_board_stem_no_archive_probe(self, store):
+        # goals.* stems have no archive variant; a 404 is a definitive miss
+        # after a single request.
+        with patch("urllib.request.urlopen", side_effect=_http_error(404)) as mock_open:
+            state, _ = store.read_foreign("goals.agent-memory-scoped-auth")
+        assert state == "missing"
+        assert mock_open.call_count == 1
+
+    def test_unreachable_degrades_not_raises(self, store):
+        import urllib.error
+        err = urllib.error.URLError(ConnectionRefusedError("Connection refused"))
+        with patch("urllib.request.urlopen", side_effect=err):
+            state, fm = store.read_foreign(FOREIGN_STEM)
+        assert state == "unavailable"
+        assert fm is None
+
+    def test_tls_failure_degrades_not_raises(self, store):
+        with patch("urllib.request.urlopen", side_effect=_ssl_error()):
+            state, _ = store.read_foreign(FOREIGN_STEM)
+        assert state == "unavailable"
+
+    def test_unparseable_target_is_error(self, store):
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.return_value = _response("no frontmatter here\n")
+            state, fm = store.read_foreign(FOREIGN_STEM)
+        assert state == "error"
+        assert fm is None
+
+    def test_result_cached(self, store):
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.return_value = _response(TICKET_CONTENT)
+            store.read_foreign(FOREIGN_STEM)
+            store.read_foreign(FOREIGN_STEM)
+        assert mock_open.call_count == 1
+
+    def test_archive_variant(self):
+        assert (
+            MdTreeStore._archive_variant("repos.x.llpm.features.FEAT-010")
+            == "repos.x.llpm.archive.FEAT-010"
+        )
+        assert MdTreeStore._archive_variant("repos.x.llpm.archive.FEAT-010") is None
+        assert MdTreeStore._archive_variant("goals.some-goal") is None
+
+
+# ---------------------------------------------------------------------------
 # TLS trust (TASK-003)
 # ---------------------------------------------------------------------------
 

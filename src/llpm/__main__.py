@@ -192,6 +192,34 @@ def _build_parser():
     p_bl.add_argument("ticket_id", help="Ticket ID to list blockers for")
     p_bl.add_argument("--json", action="store_true", help="Output as JSON object")
 
+    # -- waits --
+    p_waits = subparsers.add_parser(
+        "waits",
+        description=(
+            "Manage cross-board dependencies. 'waits_on' holds full vault stems of "
+            "tickets on other boards (e.g. repos.marginalia.llpm.features.FEAT-010) "
+            "and contributes to the derived 'blocked' status while any target is "
+            "unresolved. Bare ticket IDs are rejected -- same-board dependencies "
+            "belong in 'llpm blocker'. With a local-dir store (or the vault "
+            "unreachable) target status is unknown and does NOT block; archived "
+            "targets are followed to their archive stem automatically."
+        ),
+        help="Manage cross-board dependencies (add/rm/list)",
+    )
+    waits_sub = p_waits.add_subparsers(dest="waits_action")
+
+    p_wa = waits_sub.add_parser("add", help="Add a cross-board dependency")
+    p_wa.add_argument("ticket_id", help="The ticket that waits")
+    p_wa.add_argument("--on", required=True, dest="on", help="Full vault stem of the target ticket")
+
+    p_wr = waits_sub.add_parser("rm", help="Remove a cross-board dependency")
+    p_wr.add_argument("ticket_id", help="The ticket to remove the dependency from")
+    p_wr.add_argument("--on", required=True, dest="on", help="The target stem to remove")
+
+    p_wl = waits_sub.add_parser("list", help="List cross-board waits with resolution state")
+    p_wl.add_argument("ticket_id", help="Ticket ID to list waits for")
+    p_wl.add_argument("--json", action="store_true", help="Output as JSON object")
+
     # -- serves --
     p_serves = subparsers.add_parser(
         "serves",
@@ -359,6 +387,18 @@ def _run(args, parser, subparsers) -> None:
             subparsers.choices["serves"].print_help()
             raise SystemExit(1)
         serves_dispatch[args.serves_action](args)
+        return
+
+    if args.command == "waits":
+        waits_dispatch = {
+            "add": commands.cmd_waits_add,
+            "rm": commands.cmd_waits_rm,
+            "list": commands.cmd_waits_list,
+        }
+        if not args.waits_action:
+            subparsers.choices["waits"].print_help()
+            raise SystemExit(1)
+        waits_dispatch[args.waits_action](args)
         return
 
     handler = dispatch.get(args.command)

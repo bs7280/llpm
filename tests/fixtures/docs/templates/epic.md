@@ -6,6 +6,7 @@ status: draft  # draft | planned | open | in-progress | review | complete | clos
 priority: medium  # low | medium | high
 parent: null
 blockers: []
+waits_on: []  # cross-board deps: full vault stems (contribute to blocked)
 serves: []  # full vault stems of goal notes this serves (cross-repo)
 created: "__DATE__"
 updated: "__DATE__"

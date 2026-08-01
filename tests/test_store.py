@@ -209,6 +209,9 @@ class FakeStore:
     def exists(self, ticket_id):
         return self.read(ticket_id) is not None
 
+    def read_foreign(self, stem):
+        return ("unavailable", None)
+
     def _bucket(self, ref):
         return self.archived if ref.parent.name == "archive" else self.active
 

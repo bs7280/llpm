@@ -128,7 +128,7 @@ def validate_frontmatter(data: dict) -> list[str]:
         errors.append(f"ID '{ticket_id}' does not match type '{ticket_type}' (expected prefix '{expected_prefix}-')")
 
     # Validate list fields are lists
-    for field in ("blockers", "tags", "serves"):
+    for field in ("blockers", "tags", "serves", "waits_on"):
         val = data.get(field)
         if val is not None and not isinstance(val, list):
             errors.append(f"Field '{field}' must be a list, got {type(val).__name__}")
@@ -218,13 +218,10 @@ def next_id(docs_root: Path, ticket_type: str) -> str:
 # -- Blocker Resolution --
 
 def is_blocked(docs_root: Path, frontmatter: dict) -> bool:
-    """Check if a ticket has any unresolved blockers."""
-    blockers = frontmatter.get("blockers") or []
-    if not blockers:
-        return False
-
+    """Check if a ticket has any unresolved blockers or cross-board waits."""
     store = _as_store(docs_root)
-    for blocker_id in blockers:
+
+    for blocker_id in frontmatter.get("blockers") or []:
         try:
             found = store.read(blocker_id)
         except (ValueError, yaml.YAMLError):
@@ -235,6 +232,9 @@ def is_blocked(docs_root: Path, frontmatter: dict) -> bool:
         _, fm, _ = found
         if fm.get("status") not in RESOLVED_STATUSES:
             return True
+
+    if any(d["blocking"] for d in get_waits_on_details(store, frontmatter)):
+        return True
 
     return False
 
@@ -274,6 +274,44 @@ def get_blocker_details(docs_root: Path, frontmatter: dict) -> list[dict]:
             "resolved": fm.get("status") in RESOLVED_STATUSES,
         })
 
+    return details
+
+
+def _read_foreign(store, stem: str) -> tuple[str, dict | None]:
+    """Resolve a foreign vault stem via the store. Stores that predate the
+    ``read_foreign`` protocol method degrade to 'unavailable'."""
+    fn = getattr(store, "read_foreign", None)
+    if fn is None:
+        return ("unavailable", None)
+    return fn(stem)
+
+
+def get_waits_on_details(docs_root: Path, frontmatter: dict) -> list[dict]:
+    """Resolve each cross-board ``waits_on`` stem to its current state.
+
+    States: 'ok' (target read; status/resolved meaningful), 'missing'
+    (definitive miss -> blocking, mirrors dangling intra-board blockers),
+    'error' (target unparseable -> blocking), 'unavailable' (store cannot
+    resolve foreign stems or vault unreachable -> NOT blocking, so local-dir
+    and offline use degrades gracefully instead of freezing the board).
+    """
+    waits = frontmatter.get("waits_on") or []
+    if not waits:
+        return []
+
+    store = _as_store(docs_root)
+    details = []
+    for stem in waits:
+        state, fm = _read_foreign(store, stem)
+        status = fm.get("status") if fm else None
+        resolved = state == "ok" and status in RESOLVED_STATUSES
+        details.append({
+            "stem": stem,
+            "state": state,
+            "status": status,
+            "resolved": resolved,
+            "blocking": state in ("missing", "error") or (state == "ok" and not resolved),
+        })
     return details
 
 

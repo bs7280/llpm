@@ -265,6 +265,7 @@ def _ticket_to_dict(store: TicketStore, path: Path, fm: dict, body: str | None =
             for d in blocker_details
         ],
         "serves": fm.get("serves") or [],
+        "waits_on": parser.get_waits_on_details(store, fm),
         "tags": fm.get("tags") or [],
         "requires_human": fm.get("requires_human", False),
         "created": fm.get("created"),
@@ -488,6 +489,15 @@ def cmd_show(args) -> None:
     else:
         print(f"Blockers:  -")
 
+    # Cross-board waits with resolution state
+    waits_details = parser.get_waits_on_details(store, fm)
+    if waits_details:
+        parts = []
+        for d in waits_details:
+            label = d["status"] or d["state"]
+            parts.append(f"{d['stem']} ({label}) {_waits_tag(d)}")
+        print(f"Waits on:  {', '.join(parts)}")
+
     # Goal references (epics/features)
     serves = fm.get("serves") or []
     if serves or fm.get("type") in parser.SERVES_TYPES:
@@ -641,6 +651,7 @@ def cmd_set(args) -> None:
         "status": "Use 'llpm status'.",
         "blockers": "Use 'llpm blocker'.",
         "serves": "Use 'llpm serves'.",
+        "waits_on": "Use 'llpm waits'.",
     }
 
     # Parse field=value pairs
@@ -765,6 +776,112 @@ def cmd_serves_rm(args) -> None:
     fm["updated"] = _today()
     store.write(path, fm, body)
     print(f"{fm['id']}: no longer serves '{goal_stem}'")
+
+
+# Display tag for each waits_on resolution state ('ok' depends on resolved)
+_WAITS_STATE_TAGS = {
+    "missing": "[MISSING]",
+    "error": "[ERROR]",
+    "unavailable": "[UNKNOWN]",
+}
+
+
+def _waits_tag(detail: dict) -> str:
+    if detail["state"] == "ok":
+        return "[RESOLVED]" if detail["resolved"] else "[BLOCKING]"
+    return _WAITS_STATE_TAGS[detail["state"]]
+
+
+def cmd_waits_add(args) -> None:
+    store, docs_root = _resolve_store_and_root(args)
+
+    path, fm, body = _require_ticket(store, args.ticket_id)
+    target = args.on.strip()
+
+    # Bare ticket IDs are intra-board dependencies -- that's what blockers are.
+    if parser.TICKET_ID_RE.match(target.upper()):
+        print(
+            f"Error: 'waits_on' holds full vault stems "
+            f"(e.g. repos.marginalia.llpm.features.FEAT-010). "
+            f"For same-board dependencies use 'llpm blocker'.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    waits = fm.get("waits_on") or []
+    if target in waits:
+        print(f"{fm['id']}: already waits on '{target}'.")
+        return
+
+    waits.append(target)
+    fm["waits_on"] = waits
+    fm["updated"] = _today()
+    store.write(path, fm, body)
+
+    # Best-effort feedback on the target's current state; never fails the add.
+    state, target_fm = parser._read_foreign(store, target)
+    if state == "ok":
+        print(f"{fm['id']}: now waits on '{target}' (currently: {target_fm.get('status')})")
+    elif state == "missing":
+        print(f"{fm['id']}: now waits on '{target}'")
+        print(f"Warning: '{target}' not found in the vault -- blocking until it exists.")
+    else:
+        print(f"{fm['id']}: now waits on '{target}' (target status unknown from this store)")
+
+
+def cmd_waits_rm(args) -> None:
+    store, docs_root = _resolve_store_and_root(args)
+
+    path, fm, body = _require_ticket(store, args.ticket_id)
+    target = args.on.strip()
+
+    waits = fm.get("waits_on") or []
+    if target not in waits:
+        print(f"Error: {fm['id']} does not wait on '{target}'.", file=sys.stderr)
+        raise SystemExit(1)
+
+    fm["waits_on"] = [w for w in waits if w != target]
+    fm["updated"] = _today()
+    store.write(path, fm, body)
+    print(f"{fm['id']}: no longer waits on '{target}'")
+
+
+def cmd_waits_list(args) -> None:
+    store, docs_root = _resolve_store_and_root(args)
+
+    path, fm, body = _require_ticket(store, args.ticket_id)
+    details = parser.get_waits_on_details(store, fm)
+
+    if getattr(args, "json", False):
+        _json_out({
+            "id": fm["id"],
+            "title": fm["title"],
+            "waits_on": details,
+        })
+        return
+
+    print(f"{fm['id']}: {fm['title']}")
+    print()
+
+    if not details:
+        print("No cross-board waits.")
+        return
+
+    print("Waits on:")
+    blocking = 0
+    for d in details:
+        tag = _waits_tag(d)
+        if d["blocking"]:
+            blocking += 1
+        print(f"  {d['stem']:<48} {d['status'] or d['state']:<15} {tag}")
+
+    print()
+    if blocking > 0:
+        print(f"Status: BLOCKED ({blocking} unresolved)")
+    elif any(d["state"] == "unavailable" for d in details):
+        print("Status: unknown (cross-board reads unavailable; not blocking)")
+    else:
+        print("Status: all waits resolved")
 
 
 def cmd_blocker_add(args) -> None:

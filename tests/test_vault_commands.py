@@ -36,6 +36,8 @@ class FakeStore:
         self.active = {}    # filename -> (frontmatter, body)
         self.archived = {}  # filename -> (frontmatter, body)
         self.blobs = {}     # name -> text
+        self.foreign = {}   # vault stem -> frontmatter (cross-board notes)
+        self.foreign_reachable = True
 
     def list_tickets(self, include_archive=True):
         refs = [PurePosixPath(name) for name in self.active]
@@ -80,6 +82,13 @@ class FakeStore:
 
     def exists(self, ticket_id):
         return self.read(ticket_id) is not None
+
+    def read_foreign(self, stem):
+        if not self.foreign_reachable:
+            return ("unavailable", None)
+        if stem in self.foreign:
+            return ("ok", dict(self.foreign[stem]))
+        return ("missing", None)
 
     def _bucket(self, ref):
         return self.archived if ref.parent.name == "archive" else self.active
@@ -472,6 +481,164 @@ class TestVaultServes:
         _seed(fake, "TASK-101", "A task")
         with pytest.raises(SystemExit):
             _run("serves", "add", "TASK-101", "goals.a", docs=docs)
+
+
+# ---------------------------------------------------------------------------
+# cmd_waits + cross-board effective status (FEAT-005)
+# ---------------------------------------------------------------------------
+
+FOREIGN_STEM = "repos.marginalia.llpm.features.FEAT-010"
+
+
+def _foreign_fm(status="open"):
+    return {"id": "FEAT-010", "type": "feature", "title": "Foreign", "status": status}
+
+
+class TestVaultWaits:
+    def test_waits_add_reports_target_status(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed(fake, "TASK-101", "My task")
+        fake.foreign[FOREIGN_STEM] = _foreign_fm("in-progress")
+
+        _run("waits", "add", "TASK-101", "--on", FOREIGN_STEM, docs=docs)
+
+        out = capsys.readouterr().out
+        assert f"now waits on '{FOREIGN_STEM}'" in out
+        assert "currently: in-progress" in out
+        fm, _ = fake.active["TASK-101_MY_TASK.md"]
+        assert fm["waits_on"] == [FOREIGN_STEM]
+
+    def test_waits_add_missing_target_warns(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed(fake, "TASK-101", "My task")
+
+        _run("waits", "add", "TASK-101", "--on", "repos.gone.llpm.tasks.TASK-001", docs=docs)
+
+        out = capsys.readouterr().out
+        assert "not found in the vault" in out
+        fm, _ = fake.active["TASK-101_MY_TASK.md"]
+        assert fm["waits_on"] == ["repos.gone.llpm.tasks.TASK-001"]
+
+    def test_waits_add_ticket_id_rejected(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed(fake, "TASK-101", "My task")
+        with pytest.raises(SystemExit):
+            _run("waits", "add", "TASK-101", "--on", "FEAT-010", docs=docs)
+        err = capsys.readouterr().err
+        assert "llpm blocker" in err
+
+    def test_waits_add_duplicate(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed(fake, "TASK-101", "My task")
+        fake.foreign[FOREIGN_STEM] = _foreign_fm()
+        _run("waits", "add", "TASK-101", "--on", FOREIGN_STEM, docs=docs)
+        _run("waits", "add", "TASK-101", "--on", FOREIGN_STEM, docs=docs)
+        out = capsys.readouterr().out
+        assert "already waits on" in out
+
+    def test_waits_rm(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed(fake, "TASK-101", "My task")
+        fake.foreign[FOREIGN_STEM] = _foreign_fm()
+        _run("waits", "add", "TASK-101", "--on", FOREIGN_STEM, docs=docs)
+
+        _run("waits", "rm", "TASK-101", "--on", FOREIGN_STEM, docs=docs)
+
+        out = capsys.readouterr().out
+        assert "no longer waits on" in out
+        fm, _ = fake.active["TASK-101_MY_TASK.md"]
+        assert fm["waits_on"] == []
+
+    def test_waits_rm_not_present(self, vault_project):
+        docs, fake = vault_project
+        _seed(fake, "TASK-101", "My task")
+        with pytest.raises(SystemExit):
+            _run("waits", "rm", "TASK-101", "--on", FOREIGN_STEM, docs=docs)
+
+    def test_waits_list_states(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed(fake, "TASK-101", "My task")
+        fake.foreign[FOREIGN_STEM] = _foreign_fm("complete")
+        _run("waits", "add", "TASK-101", "--on", FOREIGN_STEM, docs=docs)
+        capsys.readouterr()
+
+        _run("waits", "list", "TASK-101", docs=docs)
+
+        out = capsys.readouterr().out
+        assert "[RESOLVED]" in out
+        assert "all waits resolved" in out
+
+    def test_cannot_set_waits_on_via_set(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed(fake, "TASK-101", "My task")
+        with pytest.raises(SystemExit):
+            _run("set", "TASK-101", f"waits_on={FOREIGN_STEM}", docs=docs)
+        err = capsys.readouterr().err
+        assert "llpm waits" in err
+
+
+class TestVaultWaitsEffectiveStatus:
+    """waits_on contributes to derived 'blocked' -- and degrades gracefully."""
+
+    def _seed_waiting(self, fake, status="open"):
+        _seed(fake, "TASK-101", "Waiting task")
+        fm, body = fake.active["TASK-101_WAITING_TASK.md"]
+        fm["waits_on"] = [FOREIGN_STEM]
+        fake.active["TASK-101_WAITING_TASK.md"] = (fm, body)
+
+    def test_unresolved_target_blocks(self, vault_project, capsys):
+        docs, fake = vault_project
+        self._seed_waiting(fake)
+        fake.foreign[FOREIGN_STEM] = _foreign_fm("in-progress")
+
+        _run("board", "--json", docs=docs)
+
+        import json
+        data = json.loads(capsys.readouterr().out)
+        t = next(t for t in data if t["id"] == "TASK-101")
+        assert t["effective_status"] == "blocked"
+        assert t["waits_on"][0]["blocking"] is True
+        assert t["waits_on"][0]["status"] == "in-progress"
+
+    def test_resolved_target_does_not_block(self, vault_project, capsys):
+        docs, fake = vault_project
+        self._seed_waiting(fake)
+        fake.foreign[FOREIGN_STEM] = _foreign_fm("complete")
+
+        _run("board", "--json", docs=docs)
+
+        import json
+        data = json.loads(capsys.readouterr().out)
+        t = next(t for t in data if t["id"] == "TASK-101")
+        assert t["effective_status"] == "open"
+        assert t["waits_on"][0]["resolved"] is True
+
+    def test_missing_target_blocks(self, vault_project, capsys):
+        docs, fake = vault_project
+        self._seed_waiting(fake)
+        # FOREIGN_STEM not in fake.foreign -> missing
+
+        _run("board", "--json", docs=docs)
+
+        import json
+        data = json.loads(capsys.readouterr().out)
+        t = next(t for t in data if t["id"] == "TASK-101")
+        assert t["effective_status"] == "blocked"
+        assert t["waits_on"][0]["state"] == "missing"
+
+    def test_unreachable_vault_does_not_block(self, vault_project, capsys):
+        docs, fake = vault_project
+        self._seed_waiting(fake)
+        fake.foreign_reachable = False
+
+        _run("board", "--json", docs=docs)
+
+        import json
+        data = json.loads(capsys.readouterr().out)
+        t = next(t for t in data if t["id"] == "TASK-101")
+        assert t["effective_status"] == "open"
+        assert t["waits_on"][0]["state"] == "unavailable"
+        assert t["waits_on"][0]["blocking"] is False
 
 
 # ---------------------------------------------------------------------------

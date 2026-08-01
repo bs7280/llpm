@@ -411,6 +411,53 @@ class TestServes:
         assert "(serves: goals.a)" in line
 
 
+class TestWaitsLocalStore:
+    """waits_on on a local-dir store: mutations work, cross-board status is
+    unknown, and unknown NEVER blocks (graceful offline degradation)."""
+
+    STEM = "repos.marginalia.llpm.features.FEAT-010"
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_waits_add_unknown_status(self, mock_today, docs_root, capsys):
+        run_cli("waits", "add", "FEAT-002", "--on", self.STEM, docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert f"now waits on '{self.STEM}'" in out
+        assert "unknown from this store" in out
+        fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
+        assert fm["waits_on"] == [self.STEM]
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_unavailable_does_not_block(self, mock_today, docs_root, capsys):
+        run_cli("waits", "add", "FEAT-002", "--on", self.STEM, docs_root=docs_root)
+        capsys.readouterr()
+        run_cli("list", docs_root=docs_root)
+        out = capsys.readouterr().out
+        line = next(l for l in out.splitlines() if "FEAT-002" in l)
+        assert "in-progress" in line  # stored status, not 'blocked'
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_waits_list_unknown(self, mock_today, docs_root, capsys):
+        run_cli("waits", "add", "FEAT-002", "--on", self.STEM, docs_root=docs_root)
+        capsys.readouterr()
+        run_cli("waits", "list", "FEAT-002", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "[UNKNOWN]" in out
+        assert "not blocking" in out
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_show_surfaces_waits(self, mock_today, docs_root, capsys):
+        run_cli("waits", "add", "FEAT-002", "--on", self.STEM, docs_root=docs_root)
+        capsys.readouterr()
+        run_cli("show", "FEAT-002", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert f"Waits on:  {self.STEM} (unavailable) [UNKNOWN]" in out
+
+    def test_waits_list_none(self, docs_root, capsys):
+        run_cli("waits", "list", "FEAT-002", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "No cross-board waits" in out
+
+
 class TestArchive:
     def test_archive_single(self, docs_root, capsys):
         run_cli("archive", "FEAT-001", docs_root=docs_root)

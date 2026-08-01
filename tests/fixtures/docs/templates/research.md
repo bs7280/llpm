@@ -7,10 +7,12 @@ priority: medium  # low | medium | high
 effort: null  # trivial | small | medium | large | xlarge
 parent: null
 blockers: []
+waits_on: []  # cross-board deps: full vault stems (contribute to blocked)
 created: "__DATE__"
 updated: "__DATE__"
 completed: null
 tags: []
+model_tier: standard  # heavy | standard | light
 ---
 
 ## Hypothesis

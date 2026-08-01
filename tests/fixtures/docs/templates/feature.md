@@ -7,6 +7,7 @@ priority: medium  # low | medium | high
 effort: null  # trivial | small | medium | large | xlarge
 parent: null
 blockers: []
+waits_on: []  # cross-board deps: full vault stems (contribute to blocked)
 serves: []  # full vault stems of goal notes this serves (cross-repo)
 created: "__DATE__"
 updated: "__DATE__"

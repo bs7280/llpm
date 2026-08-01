@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+import yaml
+
 from . import parser as _parser
 
 
@@ -87,6 +89,19 @@ class TicketStore(Protocol):
         """True if a ticket with this ID exists (active or archived)."""
         ...
 
+    def read_foreign(self, stem: str) -> tuple[str, dict | None]:
+        """Read the frontmatter of an arbitrary vault note by full stem
+        (cross-board ``waits_on`` targets). Returns ``(state, frontmatter)``:
+
+        - ``("ok", fm)``          -- note found and parsed
+        - ``("missing", None)``   -- definitive miss (note does not exist)
+        - ``("error", None)``     -- note exists but failed to parse
+        - ``("unavailable", None)`` -- this store cannot resolve foreign
+          stems, or the vault is unreachable; callers must degrade
+          gracefully (never raise, never spuriously block)
+        """
+        ...
+
 
 class LocalDirStore:
     """Behavior-preserving filesystem implementation of TicketStore.
@@ -150,6 +165,10 @@ class LocalDirStore:
 
     def exists(self, ticket_id: str) -> bool:
         return self._find(ticket_id) is not None
+
+    def read_foreign(self, stem: str) -> tuple[str, dict | None]:
+        # A local directory has no vault to resolve foreign stems against.
+        return ("unavailable", None)
 
     def _find(self, ticket_id: str) -> Path | None:
         """Case-insensitive ID prefix match on filename, active + archive."""
@@ -249,6 +268,9 @@ class MdTreeStore:
         self._ns = f"repos.{repo_stem}.llpm"
         self._ca = ca
         self._ssl_ctx: ssl.SSLContext | None = None  # built lazily from _ca
+        # Foreign-stem read cache: several tickets often wait on the same
+        # target, and board rendering resolves each ticket independently.
+        self._foreign_cache: dict[str, tuple[str, dict | None]] = {}
 
     # -- Internal HTTP helpers ------------------------------------------------
 
@@ -509,6 +531,41 @@ class MdTreeStore:
 
     def exists(self, ticket_id: str) -> bool:
         return self.read(ticket_id) is not None
+
+    def read_foreign(self, stem: str) -> tuple[str, dict | None]:
+        if stem not in self._foreign_cache:
+            self._foreign_cache[stem] = self._read_foreign_uncached(stem)
+        return self._foreign_cache[stem]
+
+    def _read_foreign_uncached(self, stem: str) -> tuple[str, dict | None]:
+        try:
+            content = self._get_raw(stem)
+            if content is None:
+                # llpm boards move archived tickets to a different stem;
+                # follow a completed-and-archived target before declaring
+                # it missing.
+                archive_stem = self._archive_variant(stem)
+                if archive_stem:
+                    content = self._get_raw(archive_stem)
+            if content is None:
+                return ("missing", None)
+        except (MdTreeStoreError, urllib.error.HTTPError):
+            return ("unavailable", None)
+
+        try:
+            fm, _ = self._parse(content, source=stem)
+        except (ValueError, yaml.YAMLError):
+            return ("error", None)
+        return ("ok", fm)
+
+    @staticmethod
+    def _archive_variant(stem: str) -> str | None:
+        """For an llpm-board ticket stem (``....llpm.<type>.<ID>``), the stem
+        the ticket would have after archiving; None for non-board stems."""
+        parts = stem.split(".")
+        if len(parts) >= 3 and parts[-3] == "llpm" and parts[-2] != "archive":
+            return ".".join(parts[:-2] + ["archive", parts[-1]])
+        return None
 
     def _blob_stem(self, name: str) -> str | None:
         """Map a blob name to a vault stem, or None if not mappable."""
