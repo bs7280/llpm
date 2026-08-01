@@ -271,3 +271,140 @@ class TestDerivedChildren:
     def test_no_children(self, docs_root):
         children = parser.get_children(docs_root, "TASK-001")
         assert children == []
+
+
+# -- Goals rollup (FEAT-008) --
+
+def _set_fields(path: Path, **fields) -> None:
+    fm, body = parser.parse_document(path)
+    fm.update(fields)
+    parser.write_document(path, fm, body)
+
+
+def _write_goal(docs_root: Path, filename: str, *, title: str, status: str) -> str:
+    """Write a `type: goal` note into tickets/. Returns the identifier
+    LocalDirStore.scan_by_type keys it by (filename stem, same as tickets --
+    a local dir has no real vault stems)."""
+    path = docs_root / "tickets" / filename
+    fm = {"id": path.stem, "type": "goal", "title": title, "status": status}
+    parser.write_document(path, fm, f"# {title}\n")
+    return path.stem
+
+
+class TestGoalNotesScan:
+    def test_finds_goal_notes(self, docs_root):
+        _write_goal(docs_root, "GOAL-001_MY_GOAL.md", title="My Goal", status="stamped")
+        stems = {stem for stem, _ in parser.get_goal_notes(docs_root)}
+        assert "GOAL-001_MY_GOAL" in stems
+
+    def test_ignores_non_goal_tickets(self, docs_root):
+        notes = parser.get_goal_notes(docs_root)
+        assert notes == []  # fixture tree has no type: goal tickets
+
+
+class TestGoalRollup:
+    def test_inherits_serves_through_parent_chain(self, docs_root):
+        goal_stem = _write_goal(docs_root, "GOAL-001_MY_GOAL.md", title="My Goal", status="stamped")
+        _set_fields(docs_root / "tickets" / "EPIC-001_CLI_TOOLING.md", serves=[goal_stem])
+
+        rollup = parser.get_goal_rollup(docs_root)
+        goal = next(g for g in rollup if g["stem"] == goal_stem)
+
+        # EPIC-001 declares serves directly; FEAT-001/FEAT-002 inherit via
+        # parent; TASK-001/RESEARCH-001 inherit transitively through FEAT-002.
+        serving_ids = {s["id"] for s in goal["serving"]}
+        assert serving_ids == {"EPIC-001", "FEAT-001", "FEAT-002", "TASK-001", "RESEARCH-001"}
+        assert goal["total"] == 5
+
+    def test_unrelated_tickets_excluded(self, docs_root):
+        goal_stem = _write_goal(docs_root, "GOAL-001_MY_GOAL.md", title="My Goal", status="stamped")
+        _set_fields(docs_root / "tickets" / "FEAT-001_EXPANDED_FRONTMATTER.md", serves=[goal_stem])
+
+        rollup = parser.get_goal_rollup(docs_root)
+        goal = next(g for g in rollup if g["stem"] == goal_stem)
+
+        # FEAT-002 is a sibling, not a descendant of FEAT-001 -- excluded.
+        serving_ids = {s["id"] for s in goal["serving"]}
+        assert serving_ids == {"FEAT-001"}
+
+    def test_counts_and_pct_done(self, docs_root):
+        goal_stem = _write_goal(docs_root, "GOAL-001_MY_GOAL.md", title="My Goal", status="stamped")
+        _set_fields(docs_root / "tickets" / "EPIC-001_CLI_TOOLING.md", serves=[goal_stem])
+
+        rollup = parser.get_goal_rollup(docs_root)
+        goal = next(g for g in rollup if g["stem"] == goal_stem)
+
+        # complete: FEAT-001, RESEARCH-001. blocked: TASK-001 (unresolved
+        # FEAT-002 blocker). in-progress: EPIC-001, FEAT-002.
+        assert goal["counts"] == {"complete": 2, "blocked": 1, "in-progress": 2}
+        assert goal["done"] == 2
+        assert goal["pct_done"] == 40
+
+    def test_stamped_true_for_status_stamped(self, docs_root):
+        goal_stem = _write_goal(docs_root, "GOAL-001_MY_GOAL.md", title="My Goal", status="stamped")
+        rollup = parser.get_goal_rollup(docs_root)
+        assert next(g for g in rollup if g["stem"] == goal_stem)["stamped"] is True
+
+    def test_stamped_false_for_draft(self, docs_root):
+        goal_stem = _write_goal(docs_root, "GOAL-002_DRAFT_GOAL.md", title="Draft Goal", status="draft")
+        rollup = parser.get_goal_rollup(docs_root)
+        assert next(g for g in rollup if g["stem"] == goal_stem)["stamped"] is False
+
+    def test_stamped_goal_with_no_serving_tickets_is_a_gap(self, docs_root):
+        goal_stem = _write_goal(docs_root, "GOAL-001_MY_GOAL.md", title="My Goal", status="stamped")
+        rollup = parser.get_goal_rollup(docs_root)
+        goal = next(g for g in rollup if g["stem"] == goal_stem)
+        assert goal["total"] == 0
+        assert goal["unplanned_gap"] is True
+
+    def test_draft_goal_with_no_serving_tickets_is_not_a_gap(self, docs_root):
+        # Drafts are proposals -- never flagged, per FEAT-008/goals convention.
+        goal_stem = _write_goal(docs_root, "GOAL-002_DRAFT_GOAL.md", title="Draft Goal", status="draft")
+        rollup = parser.get_goal_rollup(docs_root)
+        goal = next(g for g in rollup if g["stem"] == goal_stem)
+        assert goal["unplanned_gap"] is False
+
+    def test_stamped_goal_with_only_blocked_serving_tickets_is_a_gap(self, docs_root):
+        goal_stem = _write_goal(docs_root, "GOAL-001_MY_GOAL.md", title="My Goal", status="stamped")
+        # A single ticket, blocked by a dangling (nonexistent) blocker id --
+        # no other ticket needed to prove "nothing workable" here.
+        path = docs_root / "tickets" / "TASK-002_LONE.md"
+        fm = {
+            "id": "TASK-002", "type": "task", "title": "Lone", "status": "open",
+            "priority": "medium", "parent": None, "blockers": ["TASK-999"],
+            "created": "2026-01-01", "updated": "2026-01-01", "completed": None,
+            "tags": [], "serves": [goal_stem],
+        }
+        parser.write_document(path, fm, "# Lone\n")
+
+        rollup = parser.get_goal_rollup(docs_root)
+        goal = next(g for g in rollup if g["stem"] == goal_stem)
+        assert goal["counts"] == {"blocked": 1}
+        assert goal["unplanned_gap"] is True
+
+    def test_stamped_goal_fully_done_is_not_a_gap(self, docs_root):
+        # All serving tickets complete/closed -- the goal is achieved, not
+        # stuck; must not be flagged even though nothing is "workable".
+        goal_stem = _write_goal(docs_root, "GOAL-001_MY_GOAL.md", title="My Goal", status="stamped")
+        _set_fields(docs_root / "tickets" / "FEAT-001_EXPANDED_FRONTMATTER.md", serves=[goal_stem])
+
+        rollup = parser.get_goal_rollup(docs_root)
+        goal = next(g for g in rollup if g["stem"] == goal_stem)
+        assert goal["counts"] == {"complete": 1}
+        assert goal["pct_done"] == 100
+        assert goal["unplanned_gap"] is False
+
+    def test_stamped_goal_with_in_progress_serving_ticket_is_not_a_gap(self, docs_root):
+        goal_stem = _write_goal(docs_root, "GOAL-001_MY_GOAL.md", title="My Goal", status="stamped")
+        _set_fields(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md", serves=[goal_stem])
+        # FEAT-002 is in-progress -- active work exists, so this isn't a gap
+        # even though nothing is literally in "open".
+        rollup = parser.get_goal_rollup(docs_root)
+        goal = next(g for g in rollup if g["stem"] == goal_stem)
+        assert goal["unplanned_gap"] is False
+
+    def test_stamped_sorts_before_draft(self, docs_root):
+        _write_goal(docs_root, "GOAL-002_DRAFT_GOAL.md", title="Draft Goal", status="draft")
+        _write_goal(docs_root, "GOAL-001_MY_GOAL.md", title="My Goal", status="stamped")
+        rollup = parser.get_goal_rollup(docs_root)
+        assert [g["stamped"] for g in rollup] == [True, False]

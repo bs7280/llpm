@@ -343,6 +343,22 @@ def _build_parser():
     p_skills.add_argument("--show", "-s", metavar="NAME", help="Print a skill's content to stdout")
     p_skills.add_argument("--install", metavar="NAME", help="Install a skill to .claude/commands/")
 
+    # -- goals --
+    p_goals = subparsers.add_parser(
+        "goals",
+        description=(
+            "Roll up per-goal progress from 'serves:' chains. Scans the vault for "
+            "'type: goal' notes (a type scan, never a location assumption -- goal is "
+            "a type, not a place) and, for each, aggregates status counts from "
+            "tickets on this board that serve it -- directly via 'serves:', or "
+            "inherited through their parent chain. Only 'status: stamped' goals bind "
+            "planning and can show an unplanned-gap flag (no workable serving "
+            "tickets); draft goals render as proposals."
+        ),
+        help="Roll up goal progress from serves: chains; flag unplanned gaps",
+    )
+    p_goals.add_argument("--json", action="store_true", help="Output as JSON array")
+
     # -- project --
     p_project = subparsers.add_parser(
         "project",
@@ -399,6 +415,7 @@ def _run(args, parser, subparsers) -> None:
         "set": commands.cmd_set,
         "archive": commands.cmd_archive,
         "delete": commands.cmd_delete,
+        "goals": commands.cmd_goals,
         "project": commands.cmd_project,
         "skills": commands.cmd_skills,
         "todo": commands.cmd_todo,

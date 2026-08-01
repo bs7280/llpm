@@ -38,6 +38,7 @@ class FakeStore:
         self.blobs = {}     # name -> text
         self.foreign = {}   # vault stem -> frontmatter (cross-board notes)
         self.foreign_reachable = True
+        self.goal_notes = {}  # vault stem -> frontmatter (type: goal notes)
 
     def list_tickets(self, include_archive=True):
         refs = [PurePosixPath(name) for name in self.active]
@@ -90,12 +91,19 @@ class FakeStore:
             return ("ok", dict(self.foreign[stem]))
         return ("missing", None)
 
+    def scan_by_type(self, type_value):
+        return [
+            (stem, dict(fm))
+            for stem, fm in self.goal_notes.items()
+            if fm.get("type") == type_value
+        ]
+
     def _bucket(self, ref):
         return self.archived if ref.parent.name == "archive" else self.active
 
 
 def _seed(store, ticket_id, title, *, ticket_type="task", status="open",
-          parent=None, blockers=None):
+          parent=None, blockers=None, serves=None):
     fm = {
         "id": ticket_id,
         "type": ticket_type,
@@ -109,6 +117,8 @@ def _seed(store, ticket_id, title, *, ticket_type="task", status="open",
         "completed": None,
         "tags": [],
     }
+    if serves is not None:
+        fm["serves"] = serves
     slug = title.upper().replace(" ", "_")
     store.active[f"{ticket_id}_{slug}.md"] = (fm, f"# {title}\n")
 
@@ -481,6 +491,80 @@ class TestVaultServes:
         _seed(fake, "TASK-101", "A task")
         with pytest.raises(SystemExit):
             _run("serves", "add", "TASK-101", "goals.a", docs=docs)
+
+
+# ---------------------------------------------------------------------------
+# cmd_goals (FEAT-008)
+# ---------------------------------------------------------------------------
+
+def _seed_goal(fake, stem, title, *, status="stamped"):
+    fake.goal_notes[stem] = {"type": "goal", "title": title, "status": status}
+
+
+class TestVaultGoals:
+    def test_no_goal_notes(self, vault_project, capsys):
+        docs, fake = vault_project
+        _run("goals", docs=docs)
+        out = capsys.readouterr().out
+        assert "No 'type: goal' notes found." in out
+
+    def test_rollup_direct_and_inherited_serving(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed_goal(fake, "goals.my-goal", "My Goal")
+        _seed(fake, "EPIC-101", "An epic", ticket_type="epic", status="in-progress",
+              serves=["goals.my-goal"])
+        _seed(fake, "TASK-101", "Inherits via parent", parent="EPIC-101", status="open")
+        _seed(fake, "TASK-102", "Unrelated", status="open")
+
+        _run("goals", docs=docs)
+
+        out = capsys.readouterr().out
+        assert "goals.my-goal" in out
+        assert "[stamped]" in out
+        assert "EPIC-101 (in-progress)" in out
+        assert "TASK-101 (open)" in out
+        assert "TASK-102" not in out
+
+    def test_draft_goal_not_flagged_as_gap(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed_goal(fake, "goals.proposed", "Proposed Goal", status="draft")
+
+        _run("goals", docs=docs)
+
+        out = capsys.readouterr().out
+        assert "draft -- proposal, not binding" in out
+        assert "-- 0 unplanned gap(s) --" in out
+
+    def test_stamped_goal_with_no_serving_tickets_is_a_gap(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed_goal(fake, "goals.orphaned", "Orphaned Goal")
+
+        _run("goals", docs=docs)
+
+        out = capsys.readouterr().out
+        assert "UNPLANNED GAP" in out
+        assert "-- 1 unplanned gap(s) --" in out
+        assert "goals.orphaned" in out
+
+    def test_json_output(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed_goal(fake, "goals.my-goal", "My Goal")
+        _seed(fake, "FEAT-101", "A feature", ticket_type="feature", status="complete",
+              serves=["goals.my-goal"])
+
+        _run("goals", "--json", docs=docs)
+
+        import json
+        out = capsys.readouterr().out
+        data = json.loads(out)
+        assert len(data) == 1
+        goal = data[0]
+        assert goal["stem"] == "goals.my-goal"
+        assert goal["stamped"] is True
+        assert goal["total"] == 1
+        assert goal["done"] == 1
+        assert goal["pct_done"] == 100
+        assert goal["unplanned_gap"] is False
 
 
 # ---------------------------------------------------------------------------

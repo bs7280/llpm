@@ -102,6 +102,14 @@ class TicketStore(Protocol):
         """
         ...
 
+    def scan_by_type(self, type_value: str) -> list[tuple[str, dict]]:
+        """Find notes anywhere in scope whose frontmatter ``type:`` equals
+        ``type_value`` (e.g. ``"goal"`` -- goal is a type, not a place).
+        Returns ``(stem, frontmatter)`` pairs. Notes that fail to parse are
+        skipped, not fatal. A store with nothing to scan (or that predates
+        this protocol method) returns ``[]``."""
+        ...
+
 
 class LocalDirStore:
     """Behavior-preserving filesystem implementation of TicketStore.
@@ -169,6 +177,18 @@ class LocalDirStore:
     def read_foreign(self, stem: str) -> tuple[str, dict | None]:
         # A local directory has no vault to resolve foreign stems against.
         return ("unavailable", None)
+
+    def scan_by_type(self, type_value: str) -> list[tuple[str, dict]]:
+        # A local dir has no vault -- this only sees its own tickets dir.
+        results = []
+        for ref in self.list_tickets(include_archive=True):
+            try:
+                fm, _ = self.read_ref(ref)
+            except (ValueError, yaml.YAMLError):
+                continue
+            if fm.get("type") == type_value:
+                results.append((ref.stem, fm))
+        return results
 
     def _find(self, ticket_id: str) -> Path | None:
         """Case-insensitive ID prefix match on filename, active + archive."""
@@ -557,6 +577,63 @@ class MdTreeStore:
         except (ValueError, yaml.YAMLError):
             return ("error", None)
         return ("ok", fm)
+
+    # Page size for scan_by_type. Small enough that when the bulk
+    # include=frontmatter call 500s on one bad note (see _scan_page), the
+    # per-stem fallback it triggers only has to redo this many requests,
+    # not the whole vault.
+    _SCAN_PAGE_SIZE = 100
+
+    def scan_by_type(self, type_value: str) -> list[tuple[str, dict]]:
+        """Vault-wide scan for notes with a given frontmatter ``type:`` value.
+
+        Naive full scan, paginated -- the vault has no type index yet
+        (deferred; goals-layer design decision 7 builds one when scan cost
+        actually bites). Individual notes whose frontmatter the vault can't
+        parse are skipped, not fatal (mirrors read_foreign's degrade rule).
+        """
+        results: list[tuple[str, dict]] = []
+        offset = 0
+        total = None
+        while total is None or offset < total:
+            total, pairs = self._scan_page(offset)
+            results.extend((stem, fm) for stem, fm in pairs if fm.get("type") == type_value)
+            offset += self._SCAN_PAGE_SIZE
+        return results
+
+    def _scan_page(self, offset: int) -> tuple[int, list[tuple[str, dict]]]:
+        """One page of ``(stem, frontmatter)`` pairs for scan_by_type.
+
+        Falls back to per-stem frontmatter fetches, skipping ones that
+        error, if the bulk ``include=frontmatter`` call 500s -- one note
+        with frontmatter the vault can't parse server-side must not blind
+        the scan to its whole page.
+        """
+        bulk_url = (
+            self._base
+            + f"/api/v1/notes?pattern=*&include=frontmatter&limit={self._SCAN_PAGE_SIZE}&offset={offset}"
+        )
+        try:
+            data = self._get_json(bulk_url)
+            pairs = [(i["stem"], i.get("frontmatter") or {}) for i in data["items"]]
+            return data["total"], pairs
+        except urllib.error.HTTPError as e:
+            if e.code != 500:
+                raise
+
+        stems_url = (
+            self._base + f"/api/v1/notes?pattern=*&limit={self._SCAN_PAGE_SIZE}&offset={offset}"
+        )
+        data = self._get_json(stems_url)
+        pairs = []
+        for entry in data["items"]:
+            stem = entry["stem"]
+            try:
+                fm = self._get_json(self._url(stem) + "/frontmatter")
+            except urllib.error.HTTPError:
+                continue  # unreadable note -- skip, don't fail the whole scan
+            pairs.append((stem, fm))
+        return data["total"], pairs
 
     @staticmethod
     def _archive_variant(stem: str) -> str | None:

@@ -358,3 +358,98 @@ def get_children(docs_root: Path, ticket_id: str) -> list[dict]:
                 "status": fm.get("status"),
             })
     return children
+
+
+# -- Goals rollup (FEAT-008) --
+
+def get_goal_notes(docs_root: Path) -> list[tuple[str, dict]]:
+    """Vault-wide scan for ``type: goal`` notes -- goal is a type, not a
+    place. Degrades to ``[]`` for stores that can't scan (a local dir with
+    no vault, or a store predating the ``scan_by_type`` protocol method)."""
+    store = _as_store(docs_root)
+    fn = getattr(store, "scan_by_type", None)
+    if fn is None:
+        return []
+    return fn("goal")
+
+
+def _goal_stems_served(frontmatter: dict, by_id: dict[str, dict]) -> set[str]:
+    """Every goal stem a ticket serves: its own ``serves`` plus every
+    ancestor's (only epics/features carry `serves`; tasks/research inherit
+    it by walking the `parent` chain up)."""
+    stems = set(frontmatter.get("serves") or [])
+    seen: set[str] = set()
+    parent_id = frontmatter.get("parent")
+    while parent_id:
+        key = parent_id.upper()
+        if key in seen:
+            break  # guard against a parent cycle
+        seen.add(key)
+        parent_fm = by_id.get(key)
+        if parent_fm is None:
+            break
+        stems.update(parent_fm.get("serves") or [])
+        parent_id = parent_fm.get("parent")
+    return stems
+
+
+def get_goal_rollup(docs_root: Path) -> list[dict]:
+    """Roll up per-goal progress from ``serves:`` chains, on this board.
+
+    Scans the vault for ``type: goal`` notes, then for each gathers every
+    ticket on *this* board that serves it -- directly (`serves:`) or via its
+    parent chain (a task inherits the goals its epic/feature ancestor
+    serves). Cross-repo aggregation across every board is marginalia's job
+    (the 5000-ft rollup view); a single `llpm` invocation only sees its own
+    board, so this stays board-scoped by construction.
+
+    Only ``status: stamped`` goals bind planning (``goal["stamped"]``);
+    drafts render as proposals and are never flagged as a gap.
+    ``unplanned_gap`` is true for a stamped goal with no serving tickets, or
+    with serving tickets but none open/in-progress/review and not all of
+    them done -- i.e. nothing left for an agent to pick up and the goal
+    isn't actually achieved either, the trigger for a planning session with
+    Ben rather than agents freelancing. A goal whose serving tickets are all
+    complete/closed is NOT a gap -- that's the goal achieved, not stuck.
+    """
+    store = _as_store(docs_root)
+    goal_notes = get_goal_notes(store)
+    tickets = load_all_tickets(store, include_archive=True)
+    by_id = {fm["id"].upper(): fm for _, fm, _ in tickets if fm.get("id")}
+
+    rollup = []
+    for goal_stem, goal_fm in goal_notes:
+        serving = [
+            (fm, effective_status(store, fm))
+            for _, fm, _ in tickets
+            if goal_stem in _goal_stems_served(fm, by_id)
+        ]
+        serving.sort(key=lambda item: item[0].get("id") or "")
+
+        counts: dict[str, int] = {}
+        for _, status in serving:
+            counts[status] = counts.get(status, 0) + 1
+
+        total = len(serving)
+        done = counts.get("complete", 0) + counts.get("closed", 0)
+        workable = counts.get("open", 0) + counts.get("in-progress", 0) + counts.get("review", 0)
+        stamped = goal_fm.get("status") == "stamped"
+
+        rollup.append({
+            "stem": goal_stem,
+            "title": goal_fm.get("title"),
+            "status": goal_fm.get("status"),
+            "stamped": stamped,
+            "serving": [
+                {"id": fm["id"], "type": fm.get("type"), "status": status}
+                for fm, status in serving
+            ],
+            "counts": counts,
+            "total": total,
+            "done": done,
+            "pct_done": round(100 * done / total) if total else 0,
+            "unplanned_gap": stamped and (total == 0 or (workable == 0 and done < total)),
+        })
+
+    rollup.sort(key=lambda g: (not g["stamped"], g["stem"]))
+    return rollup

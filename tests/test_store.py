@@ -147,6 +147,26 @@ class TestLocalDirStoreBlobs:
         assert "__ID__" in text
 
 
+class TestLocalDirStoreScanByType:
+    def test_finds_matching_type(self, docs_root):
+        (docs_root / "tickets" / "GOAL-001_MY_GOAL.md").write_text(
+            "---\nid: GOAL-001_MY_GOAL\ntype: goal\ntitle: My Goal\nstatus: stamped\n---\n# My Goal\n"
+        )
+        store = LocalDirStore(docs_root)
+        results = store.scan_by_type("goal")
+        assert [stem for stem, _ in results] == ["GOAL-001_MY_GOAL"]
+
+    def test_no_matches_returns_empty(self, docs_root):
+        store = LocalDirStore(docs_root)
+        assert store.scan_by_type("goal") == []
+
+    def test_skips_unparseable_files(self, docs_root):
+        (docs_root / "tickets" / "BROKEN.md").write_text("not a valid ticket, no frontmatter")
+        store = LocalDirStore(docs_root)
+        # Must not raise -- the broken file is silently skipped.
+        assert store.scan_by_type("goal") == []
+
+
 class TestProtocolConformance:
     def test_localdirstore_is_ticketstore(self, docs_root):
         assert isinstance(LocalDirStore(docs_root), TicketStore)
@@ -211,6 +231,13 @@ class FakeStore:
 
     def read_foreign(self, stem):
         return ("unavailable", None)
+
+    def scan_by_type(self, type_value):
+        return [
+            (fm["id"], dict(fm))
+            for fm, _ in self.active.values()
+            if fm.get("type") == type_value
+        ]
 
     def _bucket(self, ref):
         return self.archived if ref.parent.name == "archive" else self.active

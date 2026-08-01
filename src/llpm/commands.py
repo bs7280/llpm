@@ -1495,6 +1495,42 @@ def cmd_project(args) -> None:
         print(f"  {t:<15} {count}")
 
 
+def cmd_goals(args) -> None:
+    store, docs_root = _resolve_store_and_root(args)
+
+    use_json = getattr(args, "json", False)
+    rollup = parser.get_goal_rollup(store)
+
+    if use_json:
+        _json_out(rollup)
+        return
+
+    if not rollup:
+        print("No 'type: goal' notes found.")
+        return
+
+    for g in rollup:
+        tag = "[stamped]" if g["stamped"] else "[draft -- proposal, not binding]"
+        print(f"== {g['stem']}  {tag} ==")
+        print(f"{g['title']}")
+        if g["serving"]:
+            parts = [f"{s['id']} ({s['status']})" for s in g["serving"]]
+            print(f"  Serving (this board): {', '.join(parts)}")
+        else:
+            print(f"  Serving (this board): (none)")
+        if g["total"]:
+            counts_str = " ".join(f"{k}={v}" for k, v in sorted(g["counts"].items()))
+            print(f"  {counts_str}  done={g['done']}/{g['total']} ({g['pct_done']}%)")
+        if g["unplanned_gap"]:
+            print(f"  [UNPLANNED GAP] no workable serving tickets -- plan with Ben, don't freelance")
+        print()
+
+    gaps = [g for g in rollup if g["unplanned_gap"]]
+    print(f"-- {len(gaps)} unplanned gap(s) --")
+    for g in gaps:
+        print(f"  {g['stem']}  {g['title']}")
+
+
 def cmd_skills(args) -> None:
     """List, show, or install bundled Claude skills."""
     skills_dir = _skills_source()

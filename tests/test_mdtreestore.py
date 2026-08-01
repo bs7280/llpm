@@ -6,6 +6,8 @@ HTTP calls are mocked with unittest.mock so no network is required in CI.
 from __future__ import annotations
 
 import json
+import urllib.error
+import urllib.parse
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -381,6 +383,89 @@ class TestMdTreeStoreReadForeign:
         )
         assert MdTreeStore._archive_variant("repos.x.llpm.archive.FEAT-010") is None
         assert MdTreeStore._archive_variant("goals.some-goal") is None
+
+
+# ---------------------------------------------------------------------------
+# scan_by_type -- vault-wide type scan (FEAT-008)
+# ---------------------------------------------------------------------------
+
+class TestMdTreeStoreScanByType:
+    def test_single_page_filters_by_type(self, store):
+        def side_effect(url, *a, **kw):
+            url_str = url if isinstance(url, str) else url.full_url
+            assert "include=frontmatter" in url_str
+            return _response({
+                "items": [
+                    {"stem": "goals.a", "title": None, "frontmatter": {"type": "goal", "status": "stamped"}},
+                    {"stem": "scratch.x", "title": None, "frontmatter": {"type": "note"}},
+                ],
+                "total": 2,
+            })
+
+        with patch("urllib.request.urlopen", side_effect=side_effect) as mock_open:
+            results = store.scan_by_type("goal")
+
+        assert results == [("goals.a", {"type": "goal", "status": "stamped"})]
+        mock_open.assert_called_once()
+
+    def test_paginates_across_pages(self, store):
+        store._SCAN_PAGE_SIZE = 2
+        pages = {
+            0: {
+                "items": [
+                    {"stem": "goals.a", "frontmatter": {"type": "goal"}},
+                    {"stem": "scratch.x", "frontmatter": {"type": "note"}},
+                ],
+                "total": 3,
+            },
+            2: {
+                "items": [{"stem": "goals.b", "frontmatter": {"type": "goal"}}],
+                "total": 3,
+            },
+        }
+
+        def side_effect(url, *a, **kw):
+            url_str = url if isinstance(url, str) else url.full_url
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(url_str).query)
+            return _response(pages[int(qs["offset"][0])])
+
+        with patch("urllib.request.urlopen", side_effect=side_effect) as mock_open:
+            results = store.scan_by_type("goal")
+
+        assert {stem for stem, _ in results} == {"goals.a", "goals.b"}
+        assert mock_open.call_count == 2
+
+    def test_page_500_falls_back_to_per_stem_fetches(self, store):
+        # A bad note's frontmatter 500s the bulk include=frontmatter call for
+        # its whole page; the scan must degrade to per-stem fetches for that
+        # page rather than losing every note on it.
+        def side_effect(req_or_url, *a, **kw):
+            url = req_or_url if isinstance(req_or_url, str) else req_or_url.full_url
+            if "include=frontmatter" in url:
+                raise _http_error(500)
+            if url.rstrip("/").endswith("/frontmatter"):
+                if "goals.a" in url:
+                    return _response({"type": "goal", "status": "stamped"})
+                raise _http_error(500)  # this note is unreadable -- skipped
+            return _response({
+                "items": [{"stem": "goals.a", "title": None}, {"stem": "scratch.bad", "title": None}],
+                "total": 2,
+            })
+
+        with patch("urllib.request.urlopen", side_effect=side_effect):
+            results = store.scan_by_type("goal")
+
+        assert results == [("goals.a", {"type": "goal", "status": "stamped"})]
+
+    def test_non_500_http_error_propagates(self, store):
+        with patch("urllib.request.urlopen", side_effect=_http_error(404)):
+            with pytest.raises(urllib.error.HTTPError):
+                store.scan_by_type("goal")
+
+    def test_no_matches_returns_empty(self, store):
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.return_value = _response({"items": [], "total": 0})
+            assert store.scan_by_type("goal") == []
 
 
 # ---------------------------------------------------------------------------
