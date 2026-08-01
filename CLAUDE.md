@@ -7,7 +7,7 @@ LLM Project Manager -- a CLI tool for stateless, markdown-based project manageme
 ```bash
 uv sync                    # install deps
 uv run llpm --help         # see all commands
-uv run pytest -x -v        # run tests (261 tests)
+uv run pytest -x -v        # run tests (328 tests)
 ```
 
 ## Project Structure
@@ -32,9 +32,10 @@ tests/
 - **CLI is the frontmatter gateway** -- use CLI for structured ops, edit bodies directly
 - **Derived fields**: `blocked` status and `children` are computed at read time, never stored
 - **Blockers must be real ticket IDs** -- no free-text blockers
+- **Edge vocabulary is deliberately small**: `blockers` (hard, intra-board IDs) · `waits_on` (cross-board vault stems; contributes to derived `blocked`; unknown/offline never blocks) · `after` (soft precedence; never blocks) · `serves` (epic/feature → goal-note stems, cross-repo, soft-validated)
 - **Templates resolve store-first, then bundled** -- local-dir stores get copies on `init`; vault stores need no seeding (vault `templates.*` notes act as overrides when present)
 - **Atomic file creation** (`os.O_EXCL`) prevents ID collisions across parallel agents
-- **`set` cannot modify `status` or `blockers`** -- use dedicated `llpm status` and `llpm blocker` commands
+- **`set` cannot modify `status`, `blockers`, `serves`, `waits_on`, or `after`** -- use the dedicated `llpm status` / `blocker` / `serves` / `waits` / `after` commands
 
 ## Development
 
@@ -58,6 +59,13 @@ llpm set <ID> field=value [...]          # set simple fields
 llpm blocker add <ID> --blocked-by <ID>  # add dependency
 llpm blocker rm <ID> --blocked-by <ID>   # remove dependency
 llpm blocker list <ID>                   # show blocker details
+llpm waits add <ID> --on <stem>          # cross-board dep (full vault stem)
+llpm waits rm <ID> --on <stem>           # remove cross-board dep
+llpm waits list <ID>                     # cross-board deps + resolution state
+llpm after add <ID> --after <ID>         # soft precedence (never blocks)
+llpm after rm <ID> --after <ID>          # remove soft precedence
+llpm serves add <ID> <goal-stem>         # goal ref on epic/feature
+llpm serves rm <ID> <goal-stem>          # remove goal ref
 llpm archive <ID> | --all [--yes]        # archive closed tickets
 llpm delete <ID> [--yes]                 # delete with relationship cleanup
 llpm todo --add "text" | --rm <id> | -l | -i  # TODO inbox
