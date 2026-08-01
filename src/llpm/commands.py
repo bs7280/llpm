@@ -313,38 +313,33 @@ def _intake_auto_approved(ticket_type: str, args) -> bool:
     return ticket_type in auto_approve
 
 
-def _parent_chain_serves_goal(store: TicketStore, ticket_id: str) -> bool:
-    """True if `ticket_id` or an ancestor (walking `parent`) declares a
-    non-empty `serves`. Mirrors `_after_reaches`'s walk-by-read style rather
-    than `parser._goal_stems_served`'s bulk `by_id` map -- create-time
-    validation only needs one chain, not every ticket on the board."""
-    seen: set[str] = set()
-    current = ticket_id
-    while current:
-        key = current.upper()
-        if key in seen:
-            break  # guard against a parent cycle
-        seen.add(key)
-        found = store.read(current)
-        if found is None:
-            break
-        _, fm, _ = found
-        if fm.get("serves"):
-            return True
-        current = fm.get("parent")
-    return False
+_REQUIRE_GOAL_MODES = {"off", "warn", "enforce"}
 
 
-def _new_ticket_attaches_to_goal(
-    store: TicketStore, ticket_type: str, parent_id: str | None, serves_requested: bool
-) -> bool:
-    """True if a ticket about to be created would attach to a goal: its own
-    `--serves` (epics/features only), or an ancestor's via `--parent`."""
-    if serves_requested and ticket_type in parser.SERVES_TYPES:
-        return True
-    if parent_id and _parent_chain_serves_goal(store, parent_id):
-        return True
-    return False
+def _resolve_require_goal(args) -> str:
+    """Resolve `[intake] require_goal` (off|warn|enforce, default "warn").
+
+    Goal attachment is never enforced at *creation* -- ruling from Ben+fable
+    (2026-08-01) overriding the original FEAT-011 spec: creation always
+    succeeds for agent-origin tickets regardless of attachment. This value
+    only governs the pull-based `llpm orphans`/`llpm goals` report:
+    "off" mutes it for boards that don't track goals at all; "warn"
+    (default) surfaces unattached agent tickets there, informational only;
+    "enforce" is the same report today, but is the per-board opt-in for a
+    *future* dispatcher (`llpm next`, FEAT-009) to refuse to select orphaned
+    agent tickets as ready work -- "reconciler refuses to dispatch orphans,"
+    not "create fails." llpm has no dispatcher yet, so "enforce" has no
+    behavioral teeth in this codebase today beyond labeling the report.
+    """
+    mode = _resolve_intake_config(args).get("require_goal", "warn")
+    if mode not in _REQUIRE_GOAL_MODES:
+        print(
+            f"Error: Invalid [intake] require_goal '{mode}'. Must be one of: "
+            f"{', '.join(sorted(_REQUIRE_GOAL_MODES))}.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return mode
 
 
 def _harvest_commits(ticket_id: str) -> list[str]:
@@ -755,24 +750,16 @@ def cmd_create(args) -> None:
     origin, created_by = _resolve_provenance(args)
 
     # Ticket-intake policy (FEAT-011): agent-proposed tickets land draft
-    # unless their kind is explicitly auto-approved, and must attach to a
-    # goal (serves/parent chain) or opt into the triage pool -- "don't
-    # propose shit I don't want" as validation, not vibes. Human-authored
-    # tickets are unaffected (the policy exists to bound agent proposals).
+    # unless their kind is explicitly auto-approved. Human-authored tickets
+    # are unaffected. NOTE: goal attachment is deliberately NOT enforced
+    # here -- creation always succeeds regardless of --serves/--parent/
+    # --triage. Ruling from Ben+fable (2026-08-01) overrides the original
+    # spec: unattached agent tickets are a pull-based report concern
+    # (`llpm orphans` / `llpm goals`, gated by `[intake] require_goal`), not
+    # a creation-time gate -- goal-less boards must see zero friction.
     triage = getattr(args, "triage", False)
-    if origin == "agent":
-        if not _intake_auto_approved(ticket_type, args):
-            status = "draft"
-        if not triage and not _new_ticket_attaches_to_goal(store, ticket_type, parent_id, bool(serves)):
-            print(
-                "Error: agent-created tickets must attach to a goal -- pass "
-                "--serves (epics/features only) or --parent pointing at a "
-                "ticket whose chain already serves one -- or pass --triage "
-                "to land in the explicit triage pool for human review. "
-                "See FEAT-011.",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
+    if origin == "agent" and not _intake_auto_approved(ticket_type, args):
+        status = "draft"
 
     # Atomic create with O_EXCL retry
     max_retries = 3
@@ -1634,17 +1621,30 @@ def cmd_orphans(args) -> None:
     store, docs_root = _resolve_store_and_root(args)
 
     use_json = getattr(args, "json", False)
+    mode = _resolve_require_goal(args)
+
+    if mode == "off":
+        if use_json:
+            _json_out({"require_goal": mode, "orphans": []})
+        else:
+            print('Goal-attachment tracking is off for this board ([intake] require_goal = "off").')
+        return
+
     orphans = parser.get_orphans(store)
 
     if use_json:
-        _json_out(orphans)
+        _json_out({"require_goal": mode, "orphans": orphans})
         return
 
     if not orphans:
         print("No orphaned agent-created tickets.")
         return
 
-    print(f"-- {len(orphans)} orphaned agent-created ticket(s) (no goal attachment, not triaged) --")
+    consequence = (
+        "NOT dispatch-eligible once llpm next enforces this (FEAT-009)" if mode == "enforce"
+        else "informational only, does not block anything yet"
+    )
+    print(f"-- {len(orphans)} orphaned agent-created ticket(s) (require_goal={mode}: {consequence}) --")
     for o in orphans:
         by = f"  (created_by: {o['created_by']})" if o.get("created_by") else ""
         print(f"  {o['id']:<12} {o['title']}  [{o['status']}]{by}")

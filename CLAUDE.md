@@ -7,7 +7,7 @@ LLM Project Manager -- a CLI tool for stateless, markdown-based project manageme
 ```bash
 uv sync                    # install deps
 uv run llpm --help         # see all commands
-uv run pytest -x -v        # run tests (408 tests)
+uv run pytest -x -v        # run tests (412 tests)
 ```
 
 ## Project Structure
@@ -38,7 +38,7 @@ tests/
 - **`set` cannot modify `status`, `blockers`, `serves`, `waits_on`, or `after`** -- use the dedicated `llpm status` / `blocker` / `serves` / `waits` / `after` commands
 - **Provenance is system-written**: `origin: human|agent` + `created_by` resolve at create time (flags > `LLPM_ORIGIN`/`LLPM_CREATED_BY` env > inference); `commits: []` is harvested from ticket-ID mentions in the CWD git log at review/complete (plus explicit `--commit`); every mutation stamps `managed_by: llpm`. None of these are settable via `set`.
 - **Goal is a frontmatter type, not a place** -- any note anywhere may carry `type: goal`; `llpm goals` type-scans the vault and rolls up progress from `serves:` chains (own + inherited via `parent`) on the current board. Only `status: stamped` goals bind planning; drafts render as proposals. Cross-repo aggregation across every board is out of scope for the CLI (marginalia's 5000-ft view) -- a single `llpm` invocation only ever sees its own board.
-- **Ticket-intake policy (agent origin only)**: `llpm create` forces `status: draft` unless the ticket's `type` is on `.llpm/config.toml`'s `[intake] auto_approve` list, and requires goal attachment -- `--serves` (epics/features) or a `--parent` whose chain already serves a goal -- or an explicit `--triage` (tags `triage`). `llpm orphans` reports agent-created tickets that drift unattached later (e.g. a `serves` edge removed after the fact). Human-origin tickets are never gated.
+- **Ticket-intake policy (agent origin only)**: `llpm create` forces `status: draft` unless the ticket's `type` is on `.llpm/config.toml`'s `[intake] auto_approve` list. Goal attachment is never enforced at creation -- creation always succeeds; `--serves` (epics/features), a goal-serving `--parent`, and `--triage` (tags `triage`) are optional. `llpm orphans` / `llpm goals` are the pull-based report of agent-created tickets with no goal attachment, gated by `.llpm/config.toml`'s `[intake] require_goal` (`off`|`warn`|`enforce`, default `warn`) -- `off` mutes the report for boards that don't track goals, `warn` is informational only, `enforce` is the per-board opt-in for a *future* dispatcher to refuse orphaned agent tickets as ready work ("reconciler refuses to dispatch orphans," never "create fails" -- llpm has no dispatcher yet, so `enforce` only labels the report today). Human-origin tickets are never gated or flagged.
 
 ## Development
 

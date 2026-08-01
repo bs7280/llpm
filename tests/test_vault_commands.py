@@ -878,31 +878,31 @@ class TestVaultProvenance:
 
 
 class TestVaultCreateIntakePolicy:
-    """FEAT-011's create-time gate, exercised against the store-agnostic
-    _new_ticket_attaches_to_goal/_parent_chain_serves_goal helpers via
-    FakeStore -- proves the gate isn't LocalDirStore-specific."""
+    """FEAT-011: creation always succeeds regardless of goal attachment --
+    exercised against FakeStore to prove that's store-agnostic, not just a
+    LocalDirStore quirk. --serves/--triage remain optional conveniences."""
 
-    def test_unattached_agent_ticket_rejected(self, vault_project, capsys):
+    def test_unattached_agent_ticket_still_succeeds(self, vault_project, capsys):
         docs, fake = vault_project
-        with pytest.raises(SystemExit):
-            _run("create", "task", "Orphan idea", "--origin", "agent",
-                 "--created-by", "s-1", docs=docs)
-        assert fake.read("TASK-001") is None
+        _run("create", "task", "Orphan idea", "--origin", "agent",
+             "--created-by", "s-1", docs=docs)
+        out, err = capsys.readouterr()
+        assert err == ""
+        assert fake.read("TASK-001") is not None
 
-    def test_triage_bypasses_gate(self, vault_project, capsys):
+    def test_triage_tags(self, vault_project, capsys):
         docs, fake = vault_project
         _run("create", "task", "Needs triage", "--origin", "agent",
              "--created-by", "s-1", "--triage", docs=docs)
         _, fm, _ = fake.read("TASK-001")
         assert fm["tags"] == ["triage"]
 
-    def test_parent_chain_serves_goal_attaches(self, vault_project, capsys):
+    def test_serves_optional_attachment(self, vault_project, capsys):
         docs, fake = vault_project
-        _seed(fake, "EPIC-101", "Umbrella", ticket_type="epic", serves=["goals.my-goal"])
-        _run("create", "task", "Child of umbrella", "--origin", "agent",
-             "--created-by", "s-1", "--parent", "EPIC-101", docs=docs)
-        _, fm, _ = fake.read("TASK-001")
-        assert fm["parent"] == "EPIC-101"
+        _run("create", "feature", "New capability", "--origin", "agent",
+             "--created-by", "s-1", "--serves", "goals.my-goal", docs=docs)
+        _, fm, _ = fake.read("FEAT-001")
+        assert fm["serves"] == ["goals.my-goal"]
 
 
 # ---------------------------------------------------------------------------

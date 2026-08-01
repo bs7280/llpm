@@ -1152,26 +1152,30 @@ class TestModelTierDisplay:
 # ---------------------------------------------------------------------------
 
 class TestCreateIntakePolicy:
-    """Agent-origin tickets land draft unless auto-approved, and must attach
-    to a goal (serves/parent chain) or --triage. Human origin is unaffected."""
+    """Agent-origin tickets land draft unless auto-approved. Goal attachment
+    is NEVER enforced at creation (ruling from Ben+fable, 2026-08-01,
+    overriding the original FEAT-011 spec) -- creation always succeeds;
+    unattached agent tickets are a pull-based `llpm orphans`/`llpm goals`
+    concern instead. Human origin is unaffected either way."""
 
     @patch.object(commands, "_today", return_value="2026-03-20")
     def test_human_origin_bypasses_policy(self, mock_today, docs_root, capsys):
-        # No --triage/--serves/--parent -- the policy only gates agent origin.
         run_cli("create", "task", "Human idea", "--origin", "human", docs_root=docs_root)
         fm, _ = parser.parse_document(parser.find_ticket_by_id(docs_root, "TASK-002"))
         assert fm["status"] == "draft"
 
-    def test_agent_origin_unattached_rejected(self, docs_root, capsys):
-        with pytest.raises(SystemExit):
-            run_cli("create", "task", "Orphan idea", "--origin", "agent",
-                    "--created-by", "s-1", docs_root=docs_root)
-        err = capsys.readouterr().err
-        assert "must attach to a goal" in err
-        assert parser.find_ticket_by_id(docs_root, "TASK-002") is None  # nothing created
+    def test_agent_origin_unattached_still_succeeds(self, docs_root, capsys):
+        # No --serves/--parent/--triage -- creation must not fail or warn.
+        run_cli("create", "task", "Orphan idea", "--origin", "agent",
+                "--created-by", "s-1", docs_root=docs_root)
+        out, err = capsys.readouterr()
+        assert err == ""
+        assert "Created TASK-002" in out
+        fm, _ = parser.parse_document(parser.find_ticket_by_id(docs_root, "TASK-002"))
+        assert fm["status"] == "draft"  # draft-by-default still applies
 
     @patch.object(commands, "_today", return_value="2026-03-20")
-    def test_agent_origin_triage_allowed(self, mock_today, docs_root, capsys):
+    def test_agent_origin_triage_tags(self, mock_today, docs_root, capsys):
         run_cli("create", "task", "Needs triage", "--origin", "agent",
                 "--created-by", "s-1", "--triage", docs_root=docs_root)
         fm, _ = parser.parse_document(parser.find_ticket_by_id(docs_root, "TASK-002"))
@@ -1179,32 +1183,20 @@ class TestCreateIntakePolicy:
         assert fm["status"] == "draft"
 
     @patch.object(commands, "_today", return_value="2026-03-20")
-    def test_agent_origin_serves_on_feature_allowed(self, mock_today, docs_root, capsys):
+    def test_agent_origin_serves_on_feature_optional(self, mock_today, docs_root, capsys):
         run_cli("create", "feature", "New capability", "--origin", "agent",
                 "--created-by", "s-1", "--serves", "goals.my-goal", docs_root=docs_root)
         fm, _ = parser.parse_document(parser.find_ticket_by_id(docs_root, "FEAT-003"))
         assert fm["serves"] == ["goals.my-goal"]
 
     def test_serves_on_task_rejected(self, docs_root, capsys):
+        # Structural rule (serves is epic/feature-only), independent of the
+        # (removed) attachment mandate -- still enforced, same as `llpm
+        # serves add`.
         with pytest.raises(SystemExit):
             run_cli("create", "task", "Bad", "--serves", "goals.x", docs_root=docs_root)
         err = capsys.readouterr().err
         assert "only valid on epics/features" in err
-
-    @patch.object(commands, "_today", return_value="2026-03-20")
-    def test_agent_origin_parent_chain_attaches(self, mock_today, docs_root, capsys):
-        run_cli("create", "epic", "Umbrella", "--origin", "agent", "--created-by", "s-1",
-                "--serves", "goals.my-goal", docs_root=docs_root)
-        run_cli("create", "task", "Child of umbrella", "--origin", "agent",
-                "--created-by", "s-1", "--parent", "EPIC-002", docs_root=docs_root)
-        fm, _ = parser.parse_document(parser.find_ticket_by_id(docs_root, "TASK-002"))
-        assert fm["parent"] == "EPIC-002"
-
-    def test_agent_origin_parent_without_goal_still_rejected(self, docs_root, capsys):
-        # FEAT-001 (fixture) has no `serves` -- attaching via it must still fail.
-        with pytest.raises(SystemExit):
-            run_cli("create", "task", "Orphan child", "--origin", "agent",
-                    "--created-by", "s-1", "--parent", "FEAT-001", docs_root=docs_root)
 
 
 class TestIntakeAutoApproveConfig:
@@ -1249,6 +1241,8 @@ class TestIntakeAutoApproveConfig:
 # ---------------------------------------------------------------------------
 
 class TestOrphans:
+    """Default require_goal=warn (no .llpm/config.toml [intake] section)."""
+
     def test_no_orphans(self, docs_root, capsys):
         run_cli("orphans", docs_root=docs_root)
         out = capsys.readouterr().out
@@ -1256,17 +1250,15 @@ class TestOrphans:
 
     @patch.object(commands, "_today", return_value="2026-03-20")
     def test_unattached_agent_ticket_reported(self, mock_today, docs_root, capsys):
+        # Creation succeeds unattached (no gate) -- it shows up in the report.
         run_cli("create", "task", "Drifted idea", "--origin", "agent",
-                "--created-by", "s-1", "--triage", docs_root=docs_root)
-        # Simulate drift: the triage tag gets cleared without a goal ever attached.
-        path = parser.find_ticket_by_id(docs_root, "TASK-002")
-        fm, body = parser.parse_document(path)
-        fm["tags"] = []
-        parser.write_document(path, fm, body)
+                "--created-by", "s-1", docs_root=docs_root)
+        capsys.readouterr()  # discard the "Created TASK-002..." output
 
         run_cli("orphans", docs_root=docs_root)
         out = capsys.readouterr().out
         assert "1 orphaned agent-created ticket(s)" in out
+        assert "warn: informational only" in out
         assert "TASK-002" in out
 
     @patch.object(commands, "_today", return_value="2026-03-20")
@@ -1295,11 +1287,7 @@ class TestOrphans:
     @patch.object(commands, "_today", return_value="2026-03-20")
     def test_json_output(self, mock_today, docs_root, capsys):
         run_cli("create", "task", "Drifted idea", "--origin", "agent",
-                "--created-by", "s-1", "--triage", docs_root=docs_root)
-        path = parser.find_ticket_by_id(docs_root, "TASK-002")
-        fm, body = parser.parse_document(path)
-        fm["tags"] = []
-        parser.write_document(path, fm, body)
+                "--created-by", "s-1", docs_root=docs_root)
         capsys.readouterr()  # discard the "Created TASK-002..." output above
 
         run_cli("orphans", "--json", docs_root=docs_root)
@@ -1307,6 +1295,79 @@ class TestOrphans:
         import json
         out = capsys.readouterr().out
         data = json.loads(out)
-        assert len(data) == 1
-        assert data[0]["id"] == "TASK-002"
-        assert data[0]["created_by"] == "s-1"
+        assert data["require_goal"] == "warn"
+        assert len(data["orphans"]) == 1
+        assert data["orphans"][0]["id"] == "TASK-002"
+        assert data["orphans"][0]["created_by"] == "s-1"
+
+
+class TestRequireGoalConfig:
+    """[intake] require_goal in .llpm/config.toml (off|warn|enforce).
+
+    Needs config-file discovery (see TestIntakeAutoApproveConfig's note on
+    why --docs-root can't be used here)."""
+
+    def _init_project(self, tmp_path, monkeypatch, require_goal=None):
+        monkeypatch.chdir(tmp_path)
+        config_dir = tmp_path / ".llpm"
+        config_dir.mkdir()
+        intake = f'require_goal = "{require_goal}"\n' if require_goal else ""
+        (config_dir / "config.toml").write_text(
+            f'[store]\nkind = "dir"\nroot = "./llpm"\n\n[intake]\n{intake}'
+        )
+        main(["init"])
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_default_is_warn(self, mock_today, tmp_path, monkeypatch, capsys):
+        self._init_project(tmp_path, monkeypatch)
+        main(["create", "task", "Orphan", "--origin", "agent", "--created-by", "s-1"])
+        capsys.readouterr()
+        main(["orphans"])
+        out = capsys.readouterr().out
+        assert "warn: informational only" in out
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_off_mutes_report(self, mock_today, tmp_path, monkeypatch, capsys):
+        self._init_project(tmp_path, monkeypatch, require_goal="off")
+        main(["create", "task", "Orphan", "--origin", "agent", "--created-by", "s-1"])
+        capsys.readouterr()
+        main(["orphans"])
+        out = capsys.readouterr().out
+        assert "off for this board" in out
+        assert "Orphan" not in out
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_off_json_shape(self, mock_today, tmp_path, monkeypatch, capsys):
+        self._init_project(tmp_path, monkeypatch, require_goal="off")
+        main(["create", "task", "Orphan", "--origin", "agent", "--created-by", "s-1"])
+        capsys.readouterr()
+        main(["orphans", "--json"])
+
+        import json
+        data = json.loads(capsys.readouterr().out)
+        assert data == {"require_goal": "off", "orphans": []}
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_enforce_labels_report(self, mock_today, tmp_path, monkeypatch, capsys):
+        self._init_project(tmp_path, monkeypatch, require_goal="enforce")
+        main(["create", "task", "Orphan", "--origin", "agent", "--created-by", "s-1"])
+        capsys.readouterr()
+        main(["orphans"])
+        out = capsys.readouterr().out
+        assert "NOT dispatch-eligible" in out
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_enforce_does_not_block_creation(self, mock_today, tmp_path, monkeypatch, capsys):
+        # "enforce" gates a future dispatcher, never `llpm create` itself.
+        self._init_project(tmp_path, monkeypatch, require_goal="enforce")
+        main(["create", "task", "Orphan", "--origin", "agent", "--created-by", "s-1"])
+        out, err = capsys.readouterr()
+        assert err == ""
+        assert "Created" in out
+
+    def test_invalid_value_errors(self, tmp_path, monkeypatch, capsys):
+        self._init_project(tmp_path, monkeypatch, require_goal="block")
+        with pytest.raises(SystemExit):
+            main(["orphans"])
+        err = capsys.readouterr().err
+        assert "Invalid [intake] require_goal 'block'" in err

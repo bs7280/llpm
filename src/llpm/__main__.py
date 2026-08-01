@@ -110,8 +110,11 @@ def _build_parser():
             "and the body replaces the template content. File creation is atomic (O_EXCL) "
             "to prevent ID collisions across parallel agents. Agent-origin tickets (FEAT-011 "
             "intake policy) always land 'draft' unless their type is on the project's "
-            "[intake] auto_approve list, and must attach to a goal via --serves/--parent or "
-            "pass --triage -- 'llpm orphans' reports ones that later drift unattached."
+            "[intake] auto_approve list. Creation always succeeds regardless of goal "
+            "attachment -- 'llpm orphans'/'llpm goals' report agent tickets that never "
+            "attached to a goal (via --serves/--parent or --triage); [intake] require_goal "
+            "controls whether that's informational (warn, default) or dispatch-blocking "
+            "once a dispatcher exists (enforce), never a create-time failure."
         ),
         help="Create a new ticket from a template",
     )
@@ -151,17 +154,16 @@ def _build_parser():
         "--serves", metavar="GOAL_STEMS",
         help=(
             "Comma-separated full stems of goal notes this ticket serves "
-            "(epics/features only). For agent-origin tickets this (or "
-            "--parent chained to a goal-serving ancestor) satisfies the "
-            "FEAT-011 intake policy's goal-attachment requirement."
+            "(epics/features only). Optional -- not required for creation "
+            "to succeed, but keeps agent-origin tickets out of 'llpm orphans'."
         ),
     )
     p_create.add_argument(
         "--triage", action="store_true",
         help=(
-            "Explicitly land in the triage pool instead of attaching to a "
-            "goal (tags the ticket 'triage'). Agent-origin tickets must "
-            "pass this, --serves, or a goal-attached --parent (FEAT-011)."
+            "Tag the ticket 'triage' -- an explicit, intentional signal that "
+            "it isn't attached to a goal, so 'llpm orphans' doesn't flag it. "
+            "Optional; never required for creation to succeed."
         ),
     )
 
@@ -384,10 +386,14 @@ def _build_parser():
         "orphans",
         description=(
             "Report agent-created tickets (origin: agent) that attach to no goal -- "
-            "neither their own 'serves' nor any ancestor's -- and aren't tagged "
-            "'triage'. 'llpm create' gates this at creation time (FEAT-011), but the "
-            "graph can drift afterward (e.g. an ancestor's 'serves' edge removed via "
-            "'llpm serves rm'); this is the standing report for that drift. "
+            "neither their own 'serves' nor any ancestor's -- and aren't tagged 'triage'. "
+            "Pull-based only (FEAT-011): 'llpm create' never blocks or warns on this at "
+            "creation time, goal attachment is entirely optional there. '[intake] "
+            "require_goal' (off|warn|enforce, default warn) in .llpm/config.toml controls "
+            "this report: 'off' mutes it for boards that don't track goals, 'warn' shows "
+            "it informationally, 'enforce' is the per-board opt-in for a future dispatcher "
+            "to refuse to select orphaned agent tickets as ready work -- llpm has no "
+            "dispatcher yet, so 'enforce' only labels the report today. "
             "Human-authored tickets are never flagged -- they were never gated."
         ),
         help="Report agent-created tickets with no goal attachment (FEAT-011)",
