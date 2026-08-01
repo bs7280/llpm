@@ -288,6 +288,14 @@ def _json_out(data) -> None:
     print(json.dumps(data, indent=2, default=str))
 
 
+_PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
+
+
+def _priority_key(fm: dict) -> tuple[int, str]:
+    """Sort key for list/board output: priority high->low, then ID."""
+    return (_PRIORITY_RANK.get(fm.get("priority"), 1), fm.get("id") or "")
+
+
 # -- Commands --
 
 def cmd_init(args) -> None:
@@ -359,6 +367,8 @@ def cmd_list(args) -> None:
 
         filtered.append((path, fm, eff_status))
 
+    filtered.sort(key=lambda item: _priority_key(item[1]))
+
     if use_json:
         _json_out([_ticket_to_dict(store, path, fm) for path, fm, _ in filtered])
         return
@@ -387,6 +397,9 @@ def cmd_board(args) -> None:
         eff_status = parser.effective_status(store, fm)
         if eff_status in columns:
             columns[eff_status].append((path, fm))
+
+    for items in columns.values():
+        items.sort(key=lambda item: _priority_key(item[1]))
 
     if use_json:
         result = []

@@ -330,6 +330,49 @@ class TestSet:
         assert fm["title"] == "New Title"
 
 
+class TestPrioritySort:
+    """list/board order by priority (high->low), then ID (TASK-006)."""
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_list_sorted_by_priority(self, mock_today, docs_root, capsys):
+        run_cli("set", "TASK-001", "priority=low", docs_root=docs_root)
+        capsys.readouterr()
+        run_cli("list", docs_root=docs_root)
+        out = capsys.readouterr().out
+        ids = [l.split()[0] for l in out.splitlines()[2:] if l.strip()]
+        # high: EPIC-001, FEAT-001, FEAT-002 | medium: RESEARCH-001 | low: TASK-001
+        assert ids == ["EPIC-001", "FEAT-001", "FEAT-002", "RESEARCH-001", "TASK-001"]
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_board_column_sorted_by_priority(self, mock_today, docs_root, capsys):
+        # EPIC-001 and FEAT-002 are both in-progress; by ID alone EPIC-001
+        # sorts first, so dropping its priority must flip the order.
+        run_cli("set", "EPIC-001", "priority=low", docs_root=docs_root)
+        capsys.readouterr()
+        run_cli("board", docs_root=docs_root)
+        out = capsys.readouterr().out
+        lines = out.splitlines()
+        start = next(i for i, l in enumerate(lines) if l.startswith("-- IN-PROGRESS"))
+        section = []
+        for l in lines[start + 1:]:
+            if l.startswith("--"):
+                break
+            if l.strip():
+                section.append(l)
+        assert "FEAT-002" in section[0]
+        assert "EPIC-001" in section[1]
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_list_json_sorted(self, mock_today, docs_root, capsys):
+        import json as _json
+        run_cli("set", "TASK-001", "priority=low", docs_root=docs_root)
+        capsys.readouterr()
+        run_cli("list", "--json", docs_root=docs_root)
+        data = _json.loads(capsys.readouterr().out)
+        ids = [t["id"] for t in data]
+        assert ids == ["EPIC-001", "FEAT-001", "FEAT-002", "RESEARCH-001", "TASK-001"]
+
+
 class TestServes:
     @patch.object(commands, "_today", return_value="2026-03-20")
     def test_serves_add_feature(self, mock_today, docs_root, capsys):

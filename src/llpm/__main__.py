@@ -59,7 +59,7 @@ def _build_parser():
     p_list.add_argument("--status", help="Filter by effective status (e.g., open, blocked, in-progress)")
     p_list.add_argument("--type", help="Filter by ticket type (e.g., task, feature, epic)")
     p_list.add_argument("--parent", help="Filter by parent ticket ID (case-insensitive)")
-    p_list.add_argument("--json", action="store_true", help="Output as JSON array")
+    p_list.add_argument("--json", action="store_true", help="Output as JSON array (sorted by priority high->low, then ID)")
     p_list.add_argument("--include-archived", action="store_true", help="Include archived tickets (only with --json)")
 
     # -- board --
@@ -73,7 +73,7 @@ def _build_parser():
         ),
         help="Kanban board of active work (blocked/open/in-progress/review)",
     )
-    p_board.add_argument("--json", action="store_true", help="Output as JSON array")
+    p_board.add_argument("--json", action="store_true", help="Output as JSON array (column order, then priority high->low, then ID)")
 
     # -- backlog --
     p_backlog = subparsers.add_parser(
