@@ -707,6 +707,45 @@ class TestVaultJsonDerivedFields:
 
 
 # ---------------------------------------------------------------------------
+# Provenance (FEAT-007) — vault mode
+# ---------------------------------------------------------------------------
+
+class TestVaultProvenance:
+    def test_create_injects_provenance(self, vault_project, capsys, monkeypatch):
+        docs, fake = vault_project
+        monkeypatch.setenv("LLPM_CREATED_BY", "dispatch-run-42")
+
+        with patch.object(commands, "_today", return_value="2026-08-01"):
+            _run("create", "task", "Agent-made vault task", docs=docs)
+
+        _, fm, _ = fake.read("TASK-001")
+        assert fm["managed_by"] == "llpm"
+        assert fm["origin"] == "agent"
+        assert fm["created_by"] == "dispatch-run-42"
+        assert fm["commits"] == []
+
+    def test_mutation_stamps_managed_by(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed(fake, "TASK-101", "Legacy ticket")  # no managed_by in seed
+
+        _run("set", "TASK-101", "priority=high", docs=docs)
+
+        fm, _ = fake.active["TASK-101_LEGACY_TICKET.md"]
+        assert fm["managed_by"] == "llpm"
+
+    def test_status_review_records_explicit_commit(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed(fake, "TASK-101", "Done work")
+
+        _run("status", "TASK-101", "review", "--commit", "deadbeef", docs=docs)
+
+        out = capsys.readouterr().out
+        assert "Captured 1 commit(s)" in out
+        fm, _ = fake.active["TASK-101_DONE_WORK.md"]
+        assert fm["commits"] == ["deadbeef"]
+
+
+# ---------------------------------------------------------------------------
 # cmd_project
 # ---------------------------------------------------------------------------
 

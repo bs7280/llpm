@@ -17,6 +17,7 @@ RESOLVED_STATUSES = {"complete", "closed"}
 VALID_PRIORITIES = {"low", "medium", "high"}
 VALID_EFFORTS = {"trivial", "small", "medium", "large", "xlarge"}
 VALID_MODEL_TIERS = {"heavy", "standard", "light"}
+VALID_ORIGINS = {"human", "agent"}
 
 CORE_FIELDS = {"id", "type", "title", "status", "priority", "parent", "blockers", "created", "updated", "completed", "tags"}
 
@@ -126,6 +127,11 @@ def validate_frontmatter(data: dict) -> list[str]:
     if model_tier is not None and model_tier not in VALID_MODEL_TIERS:
         errors.append(f"Invalid model_tier: '{model_tier}'. Must be one of: {', '.join(sorted(VALID_MODEL_TIERS))}")
 
+    # origin (provenance) is optional -- validate only if present and non-null
+    origin = data.get("origin")
+    if origin is not None and origin not in VALID_ORIGINS:
+        errors.append(f"Invalid origin: '{origin}'. Must be one of: {', '.join(sorted(VALID_ORIGINS))}")
+
     # Validate ID prefix matches type
     ticket_id = data["id"]
     ticket_type = data["type"]
@@ -134,7 +140,7 @@ def validate_frontmatter(data: dict) -> list[str]:
         errors.append(f"ID '{ticket_id}' does not match type '{ticket_type}' (expected prefix '{expected_prefix}-')")
 
     # Validate list fields are lists
-    for field in ("blockers", "tags", "serves", "waits_on", "after"):
+    for field in ("blockers", "tags", "serves", "waits_on", "after", "commits"):
         val = data.get(field)
         if val is not None and not isinstance(val, list):
             errors.append(f"Field '{field}' must be a list, got {type(val).__name__}")

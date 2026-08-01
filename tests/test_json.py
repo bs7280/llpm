@@ -42,8 +42,9 @@ class TestListJson:
         for key in (
             "id", "type", "title", "status", "effective_status", "is_blocked",
             "priority", "effort", "parent", "children", "blockers", "serves",
-            "waits_on", "after", "tags", "requires_human", "created",
-            "updated", "completed", "archived", "path",
+            "waits_on", "after", "tags", "requires_human", "origin",
+            "created_by", "commits", "managed_by", "created", "updated",
+            "completed", "archived", "path",
         ):
             assert key in ticket, f"Missing key: {key}"
 

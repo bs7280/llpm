@@ -130,6 +130,27 @@ class TestValidation:
         fm["model_tier"] = None
         assert parser.validate_frontmatter(fm) == []
 
+    def test_invalid_origin(self, docs_root):
+        path = docs_root / "tickets" / "FEAT-001_EXPANDED_FRONTMATTER.md"
+        fm, _ = parser.parse_document(path)
+        fm["origin"] = "robot"
+        errors = parser.validate_frontmatter(fm)
+        assert any("Invalid origin" in e for e in errors)
+
+    def test_valid_origins(self, docs_root):
+        path = docs_root / "tickets" / "FEAT-001_EXPANDED_FRONTMATTER.md"
+        fm, _ = parser.parse_document(path)
+        for origin in ("human", "agent", None):
+            fm["origin"] = origin
+            assert parser.validate_frontmatter(fm) == []
+
+    def test_commits_must_be_list(self, docs_root):
+        path = docs_root / "tickets" / "FEAT-001_EXPANDED_FRONTMATTER.md"
+        fm, _ = parser.parse_document(path)
+        fm["commits"] = "abc123"
+        errors = parser.validate_frontmatter(fm)
+        assert any("'commits' must be a list" in e for e in errors)
+
     def test_id_prefix_mismatch(self, docs_root):
         path = docs_root / "tickets" / "FEAT-001_EXPANDED_FRONTMATTER.md"
         fm, _ = parser.parse_document(path)

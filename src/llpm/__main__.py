@@ -133,6 +133,17 @@ def _build_parser():
         "--requires-human", action="store_true",
         help="Mark as requiring human action (agents should surface this to the user)",
     )
+    p_create.add_argument(
+        "--origin", choices=["human", "agent"],
+        help=(
+            "Provenance: who created this ticket. Default: LLPM_ORIGIN env var; "
+            "else 'agent' when a created-by id is present, else 'human'."
+        ),
+    )
+    p_create.add_argument(
+        "--created-by", dest="created_by", metavar="ID",
+        help="Provenance: agent/session id. Default: LLPM_CREATED_BY env var.",
+    )
 
     # -- status --
     p_status = subparsers.add_parser(
@@ -140,7 +151,9 @@ def _build_parser():
         description=(
             "Change a ticket's status. Always updates the 'updated' date. Setting status "
             "to 'complete' also sets the 'completed' date. 'blocked' is not a valid choice "
-            "because it is derived from unresolved blockers."
+            "because it is derived from unresolved blockers. Flipping to 'review' or "
+            "'complete' captures provenance: commits mentioning the ticket ID in the "
+            "CWD git repo (plus any --commit SHAs) are recorded in commits[]."
         ),
         help="Change ticket status",
     )
@@ -149,6 +162,14 @@ def _build_parser():
         "new_status",
         choices=VALID_STATUSES_FOR_SET,
         help="New status value",
+    )
+    p_status.add_argument(
+        "--commit", action="append", metavar="SHA", dest="commit",
+        help=(
+            "Record a commit SHA on the ticket (repeatable). On 'review' and "
+            "'complete', commits in the CWD repo mentioning the ticket ID are "
+            "also captured automatically into commits[]."
+        ),
     )
 
     # -- set --

@@ -6,11 +6,14 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tomllib
 from datetime import date
 from importlib import resources as importlib_resources
 from pathlib import Path
+
+import yaml
 
 from . import parser
 from .store import LocalDirStore, MdTreeStore, TicketStore
@@ -225,6 +228,100 @@ def _require_initialized(docs_root: Path, store: TicketStore | None = None) -> N
         raise SystemExit(1)
 
 
+def _write_ticket(store: TicketStore, ref: Path, fm: dict, body: str) -> None:
+    """Chokepoint for every ticket mutation: stamps the ownership key
+    (``managed_by: llpm``, decision 6 -- the k8s kind/managed-by split) so
+    tickets self-describe their write path, then writes through the store."""
+    fm.setdefault("managed_by", "llpm")
+    store.write(ref, fm, body)
+
+
+def _resolve_provenance(args) -> tuple[str, str | None]:
+    """Resolve (origin, created_by) for a new ticket.
+
+    Precedence: CLI flag > env var. When origin is unsignaled it is inferred:
+    'agent' if a created_by id is present (harnesses set LLPM_CREATED_BY),
+    else 'human' -- a bare human shell needs no configuration.
+    """
+    created_by = getattr(args, "created_by", None) or os.environ.get("LLPM_CREATED_BY") or None
+    origin = getattr(args, "origin", None) or os.environ.get("LLPM_ORIGIN") or None
+    if origin is None:
+        origin = "agent" if created_by else "human"
+    if origin not in parser.VALID_ORIGINS:
+        print(
+            f"Error: Invalid origin '{origin}'. Must be one of: "
+            f"{', '.join(sorted(parser.VALID_ORIGINS))} (check LLPM_ORIGIN).",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return origin, created_by
+
+
+def _inject_provenance(content: str, origin: str, created_by: str | None) -> str:
+    """Append provenance + ownership keys to rendered template frontmatter.
+
+    Textual insertion (not re-serialization) so template enum-hint comments
+    survive into the created ticket. Keys the template already carries are
+    left alone.
+    """
+    try:
+        fm, _ = parser.parse_text(content, source="<template>")
+    except (ValueError, yaml.YAMLError):
+        return content  # malformed template: let create fail/succeed as before
+
+    lines = []
+    if "managed_by" not in fm:
+        lines.append("managed_by: llpm")
+    if "origin" not in fm:
+        lines.append(f"origin: {origin}")
+    if created_by and "created_by" not in fm:
+        # created_by is caller input -- serialize the one line properly
+        lines.append(yaml.safe_dump({"created_by": created_by}, default_flow_style=False).strip())
+    if "commits" not in fm:
+        lines.append("commits: []")
+    if not lines:
+        return content
+
+    parts = content.split("---", 2)
+    fm_block = parts[1].rstrip("\n") + "\n" + "\n".join(lines) + "\n"
+    return "---" + fm_block + "---" + parts[2]
+
+
+def _harvest_commits(ticket_id: str) -> list[str]:
+    """Full SHAs of commits in the CWD repo that mention the ticket ID,
+    oldest first. Best-effort: no git, no repo, or a timeout -> [].
+
+    This formalizes the ticket-IDs-in-commit-messages convention: the soft
+    links become durable ``commits:`` entries at review/complete time.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "log", "--all", "--format=%H", f"--grep={ticket_id}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode != 0:
+        return []
+    shas = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return shas[::-1]
+
+
+def _merge_commits(existing: list[str], new_shas: list[str]) -> list[str]:
+    """Append new SHAs, prefix-aware so short and full forms of the same
+    commit don't both land in the list. Never removes entries."""
+    merged = list(existing)
+    for sha in new_shas:
+        sha = sha.strip()
+        if not sha:
+            continue
+        if not any(m.startswith(sha) or sha.startswith(m) for m in merged):
+            merged.append(sha)
+    return merged
+
+
 def _require_ticket(store: TicketStore, ticket_id: str) -> tuple[Path, dict, str]:
     """Find and parse a ticket, or exit with error."""
     result = store.read(ticket_id)
@@ -270,6 +367,10 @@ def _ticket_to_dict(store: TicketStore, path: Path, fm: dict, body: str | None =
         "after": fm.get("after") or [],
         "tags": fm.get("tags") or [],
         "requires_human": fm.get("requires_human", False),
+        "origin": fm.get("origin"),
+        "created_by": fm.get("created_by"),
+        "commits": fm.get("commits") or [],
+        "managed_by": fm.get("managed_by"),
         "created": fm.get("created"),
         "updated": fm.get("updated"),
         "completed": fm.get("completed"),
@@ -531,6 +632,14 @@ def cmd_show(args) -> None:
     print(f"Updated:   {fm.get('updated') or '-'}")
     print(f"Completed: {fm.get('completed') or '-'}")
 
+    # Provenance (FEAT-007)
+    if fm.get("origin") or fm.get("created_by"):
+        by = f" (by {fm['created_by']})" if fm.get("created_by") else ""
+        print(f"Origin:    {fm.get('origin') or '-'}{by}")
+    commits = fm.get("commits") or []
+    if commits:
+        print(f"Commits:   {', '.join(c[:10] for c in commits)}")
+
     tags = fm.get("tags") or []
     print(f"Tags:      {', '.join(tags) if tags else '-'}")
     location = path.resolve() if isinstance(path, Path) else path
@@ -634,6 +743,10 @@ def cmd_create(args) -> None:
             if len(parts) >= 3:
                 content = parts[0] + "---" + parts[1] + "---\n" + body
 
+        # Provenance + ownership (FEAT-007)
+        origin, created_by = _resolve_provenance(args)
+        content = _inject_provenance(content, origin, created_by)
+
         # Atomic file creation
         try:
             filepath = store.create_exclusive(filename, content)
@@ -660,8 +773,23 @@ def cmd_status(args) -> None:
     if new_status == "complete" and not fm.get("completed"):
         fm["completed"] = _today()
 
-    store.write(path, fm, body)
+    # Commit capture (FEAT-007). Explicit --commit SHAs record on any status
+    # change; auto-harvest runs at review AND complete, so the worker's git
+    # context is used even when someone else later flips complete elsewhere.
+    explicit = list(getattr(args, "commit", None) or [])
+    harvested = _harvest_commits(fm["id"]) if new_status in ("review", "complete") else []
+    captured = 0
+    if explicit or harvested:
+        existing = list(fm.get("commits") or [])
+        merged = _merge_commits(existing, harvested + explicit)
+        captured = len(merged) - len(existing)
+        if merged:
+            fm["commits"] = merged
+
+    _write_ticket(store, path, fm, body)
     print(f"{fm['id']}: {old_status} -> {new_status}")
+    if captured:
+        print(f"Captured {captured} commit(s) -> commits[]")
 
 
 def cmd_set(args) -> None:
@@ -669,8 +797,9 @@ def cmd_set(args) -> None:
 
     path, fm, body = _require_ticket(store, args.ticket_id)
 
-    # Restricted fields
-    FORBIDDEN = {"id", "type", "created", "updated", "completed"}
+    # Restricted fields (provenance is written by the system, never by set)
+    FORBIDDEN = {"id", "type", "created", "updated", "completed",
+                 "origin", "created_by", "commits", "managed_by"}
     REDIRECT = {
         "status": "Use 'llpm status'.",
         "blockers": "Use 'llpm blocker'.",
@@ -749,7 +878,7 @@ def cmd_set(args) -> None:
         print(f"{fm['id']}: {field} = {value} (was {old})")
 
     fm["updated"] = _today()
-    store.write(path, fm, body)
+    _write_ticket(store, path, fm, body)
 
 
 def _require_serves_capable(fm: dict) -> None:
@@ -789,7 +918,7 @@ def cmd_serves_add(args) -> None:
     serves.append(goal_stem)
     fm["serves"] = serves
     fm["updated"] = _today()
-    store.write(path, fm, body)
+    _write_ticket(store, path, fm, body)
     print(f"{fm['id']}: now serves '{goal_stem}'")
 
 
@@ -806,7 +935,7 @@ def cmd_serves_rm(args) -> None:
 
     fm["serves"] = [s for s in serves if s != goal_stem]
     fm["updated"] = _today()
-    store.write(path, fm, body)
+    _write_ticket(store, path, fm, body)
     print(f"{fm['id']}: no longer serves '{goal_stem}'")
 
 
@@ -854,7 +983,7 @@ def cmd_after_add(args) -> None:
     after.append(other_id.upper())
     fm["after"] = after
     fm["updated"] = _today()
-    store.write(path, fm, body)
+    _write_ticket(store, path, fm, body)
     print(f"{fm['id']}: now ordered after '{other_id}' (soft -- never blocks)")
 
 
@@ -872,7 +1001,7 @@ def cmd_after_rm(args) -> None:
 
     fm["after"] = [a for a in after if a.upper() != upper_id]
     fm["updated"] = _today()
-    store.write(path, fm, body)
+    _write_ticket(store, path, fm, body)
     print(f"{fm['id']}: no longer ordered after '{other_id}'")
 
 
@@ -914,7 +1043,7 @@ def cmd_waits_add(args) -> None:
     waits.append(target)
     fm["waits_on"] = waits
     fm["updated"] = _today()
-    store.write(path, fm, body)
+    _write_ticket(store, path, fm, body)
 
     # Best-effort feedback on the target's current state; never fails the add.
     state, target_fm = parser._read_foreign(store, target)
@@ -940,7 +1069,7 @@ def cmd_waits_rm(args) -> None:
 
     fm["waits_on"] = [w for w in waits if w != target]
     fm["updated"] = _today()
-    store.write(path, fm, body)
+    _write_ticket(store, path, fm, body)
     print(f"{fm['id']}: no longer waits on '{target}'")
 
 
@@ -1003,7 +1132,7 @@ def cmd_blocker_add(args) -> None:
     blockers.append(blocker_id.upper())
     fm["blockers"] = blockers
     fm["updated"] = _today()
-    store.write(path, fm, body)
+    _write_ticket(store, path, fm, body)
     print(f"{fm['id']}: now blocked by '{blocker_id}'")
 
 
@@ -1023,7 +1152,7 @@ def cmd_blocker_rm(args) -> None:
 
     fm["blockers"] = [b for b in blockers if b.upper() != upper_id]
     fm["updated"] = _today()
-    store.write(path, fm, body)
+    _write_ticket(store, path, fm, body)
     print(f"{fm['id']}: removed blocker '{blocker_id}'")
 
 
@@ -1177,7 +1306,7 @@ def cmd_delete(args) -> None:
 
         if modified:
             t_fm["updated"] = _today()
-            store.write(t_path, t_fm, t_body)
+            _write_ticket(store, t_path, t_fm, t_body)
 
     store.delete(path)
     print(f"Deleted {ticket_id}.")

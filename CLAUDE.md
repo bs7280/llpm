@@ -7,7 +7,7 @@ LLM Project Manager -- a CLI tool for stateless, markdown-based project manageme
 ```bash
 uv sync                    # install deps
 uv run llpm --help         # see all commands
-uv run pytest -x -v        # run tests (328 tests)
+uv run pytest -x -v        # run tests (353 tests)
 ```
 
 ## Project Structure
@@ -36,6 +36,7 @@ tests/
 - **Templates resolve store-first, then bundled** -- local-dir stores get copies on `init`; vault stores need no seeding (vault `templates.*` notes act as overrides when present)
 - **Atomic file creation** (`os.O_EXCL`) prevents ID collisions across parallel agents
 - **`set` cannot modify `status`, `blockers`, `serves`, `waits_on`, or `after`** -- use the dedicated `llpm status` / `blocker` / `serves` / `waits` / `after` commands
+- **Provenance is system-written**: `origin: human|agent` + `created_by` resolve at create time (flags > `LLPM_ORIGIN`/`LLPM_CREATED_BY` env > inference); `commits: []` is harvested from ticket-ID mentions in the CWD git log at review/complete (plus explicit `--commit`); every mutation stamps `managed_by: llpm`. None of these are settable via `set`.
 
 ## Development
 
@@ -49,12 +50,12 @@ tests/
 
 ```bash
 llpm init                                # set up llpm/tickets/ and llpm/templates/
-llpm create <type> "title" [options]     # new ticket (epic/feature/task/research/custom)
+llpm create <type> "title" [options]     # new ticket (--origin/--created-by for provenance)
 llpm list [--status X] [--type X]        # list active tickets
 llpm board                               # kanban: blocked/open/in-progress/review
 llpm backlog                             # planned + draft tickets
 llpm show <ID>                           # full ticket details + body
-llpm status <ID> <status>                # change status
+llpm status <ID> <status> [--commit SHA] # change status (review/complete harvest commits[])
 llpm set <ID> field=value [...]          # set simple fields
 llpm blocker add <ID> --blocked-by <ID>  # add dependency
 llpm blocker rm <ID> --blocked-by <ID>   # remove dependency

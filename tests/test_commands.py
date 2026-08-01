@@ -18,6 +18,10 @@ def run_cli(*args, docs_root=None):
     main(cmd)
 
 
+# The real harvester, captured before the conftest autouse fixture stubs it.
+_REAL_HARVEST = commands._harvest_commits
+
+
 class TestInit:
     def test_fresh_init(self, tmp_path, capsys):
         docs = tmp_path / "docs"
@@ -328,6 +332,158 @@ class TestSet:
         run_cli("set", "FEAT-002", "title=New Title", docs_root=docs_root)
         fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
         assert fm["title"] == "New Title"
+
+
+class TestProvenanceCreate:
+    """FEAT-007: origin/created_by/managed_by/commits injected at create."""
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_defaults_human(self, mock_today, docs_root, capsys):
+        run_cli("create", "task", "Plain human task", docs_root=docs_root)
+        path = parser.find_ticket_by_id(docs_root, "TASK-002")
+        fm, _ = parser.parse_document(path)
+        assert fm["origin"] == "human"
+        assert fm["managed_by"] == "llpm"
+        assert fm["commits"] == []
+        assert "created_by" not in fm
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_agent_flags(self, mock_today, docs_root, capsys):
+        run_cli("create", "task", "Agent task", "--origin", "agent",
+                "--created-by", "session-abc123", docs_root=docs_root)
+        fm, _ = parser.parse_document(parser.find_ticket_by_id(docs_root, "TASK-002"))
+        assert fm["origin"] == "agent"
+        assert fm["created_by"] == "session-abc123"
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_env_created_by_infers_agent(self, mock_today, docs_root, capsys, monkeypatch):
+        monkeypatch.setenv("LLPM_CREATED_BY", "session-env-9")
+        run_cli("create", "task", "Env agent task", docs_root=docs_root)
+        fm, _ = parser.parse_document(parser.find_ticket_by_id(docs_root, "TASK-002"))
+        assert fm["origin"] == "agent"
+        assert fm["created_by"] == "session-env-9"
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_explicit_origin_beats_inference(self, mock_today, docs_root, capsys, monkeypatch):
+        monkeypatch.setenv("LLPM_ORIGIN", "human")
+        monkeypatch.setenv("LLPM_CREATED_BY", "bens-shell")
+        run_cli("create", "task", "Attributed human task", docs_root=docs_root)
+        fm, _ = parser.parse_document(parser.find_ticket_by_id(docs_root, "TASK-002"))
+        assert fm["origin"] == "human"
+        assert fm["created_by"] == "bens-shell"
+
+    def test_invalid_env_origin_errors(self, docs_root, capsys, monkeypatch):
+        monkeypatch.setenv("LLPM_ORIGIN", "robot")
+        with pytest.raises(SystemExit):
+            run_cli("create", "task", "Bad origin", docs_root=docs_root)
+        err = capsys.readouterr().err
+        assert "Invalid origin 'robot'" in err
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_template_comments_survive_injection(self, mock_today, docs_root, capsys):
+        run_cli("create", "task", "Commented task", docs_root=docs_root)
+        text = parser.find_ticket_by_id(docs_root, "TASK-002").read_text(encoding="utf-8")
+        assert "# draft | planned" in text  # enum-hint comment intact
+        assert "managed_by: llpm" in text
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_created_ticket_validates(self, mock_today, docs_root, capsys):
+        run_cli("create", "task", "Valid task", "--created-by", "s-1", docs_root=docs_root)
+        fm, _ = parser.parse_document(parser.find_ticket_by_id(docs_root, "TASK-002"))
+        assert parser.validate_frontmatter(fm) == []
+
+
+class TestProvenanceMutation:
+    """FEAT-007: managed_by stamped on mutate; provenance locked from set."""
+
+    @pytest.mark.parametrize("field", ["origin", "created_by", "commits", "managed_by"])
+    def test_set_forbids_provenance_fields(self, docs_root, field):
+        with pytest.raises(SystemExit):
+            run_cli("set", "FEAT-002", f"{field}=x", docs_root=docs_root)
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_mutation_stamps_managed_by(self, mock_today, docs_root, capsys):
+        # Fixture tickets predate managed_by; any mutation adds it.
+        fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
+        assert "managed_by" not in fm
+        run_cli("set", "FEAT-002", "priority=low", docs_root=docs_root)
+        fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
+        assert fm["managed_by"] == "llpm"
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_status_flip_stamps_managed_by(self, mock_today, docs_root, capsys):
+        run_cli("status", "TASK-001", "in-progress", docs_root=docs_root)
+        fm, _ = parser.parse_document(docs_root / "tickets" / "TASK-001_ADD_PYYAML.md")
+        assert fm["managed_by"] == "llpm"
+
+
+class TestCommitCapture:
+    """FEAT-007: commits[] captured at review/complete + explicit --commit."""
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_review_harvests(self, mock_today, docs_root, capsys, monkeypatch):
+        sha = "a" * 40
+        monkeypatch.setattr(commands, "_harvest_commits", lambda tid: [sha])
+        run_cli("status", "FEAT-002", "review", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "Captured 1 commit(s)" in out
+        fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
+        assert fm["commits"] == [sha]
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_explicit_commit_any_status(self, mock_today, docs_root, capsys):
+        run_cli("status", "TASK-001", "in-progress", "--commit", "abc1234", docs_root=docs_root)
+        fm, _ = parser.parse_document(docs_root / "tickets" / "TASK-001_ADD_PYYAML.md")
+        assert fm["commits"] == ["abc1234"]
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_no_harvest_outside_review_complete(self, mock_today, docs_root, capsys, monkeypatch):
+        calls = []
+        monkeypatch.setattr(commands, "_harvest_commits", lambda tid: (calls.append(tid), [])[1])
+        run_cli("status", "TASK-001", "in-progress", docs_root=docs_root)
+        assert calls == []
+        run_cli("status", "TASK-001", "review", docs_root=docs_root)
+        assert calls == ["TASK-001"]
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_prefix_dedup(self, mock_today, docs_root, capsys, monkeypatch):
+        full = "b" * 40
+        monkeypatch.setattr(commands, "_harvest_commits", lambda tid: [full])
+        run_cli("status", "FEAT-002", "review", docs_root=docs_root)
+        # Re-flip with a short prefix of the same sha: no duplicate
+        run_cli("status", "FEAT-002", "complete", "--commit", full[:8], docs_root=docs_root)
+        fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
+        assert fm["commits"] == [full]
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_harvest_from_real_git_repo(self, mock_today, docs_root, tmp_path, capsys, monkeypatch):
+        import subprocess
+        repo = tmp_path / "workrepo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=T",
+             "commit", "--allow-empty", "-q", "-m", "feat: TASK-001 add pyyaml dep"],
+            cwd=repo, check=True,
+        )
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        monkeypatch.chdir(repo)
+        monkeypatch.setattr(commands, "_harvest_commits", _REAL_HARVEST)
+        run_cli("status", "TASK-001", "complete", docs_root=docs_root)
+
+        fm, _ = parser.parse_document(docs_root / "tickets" / "TASK-001_ADD_PYYAML.md")
+        assert fm["commits"] == [sha]
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_show_displays_commits(self, mock_today, docs_root, capsys):
+        run_cli("status", "FEAT-002", "review", "--commit", "c" * 40, docs_root=docs_root)
+        capsys.readouterr()
+        run_cli("show", "FEAT-002", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "Commits:   cccccccccc" in out
 
 
 class TestPrioritySort:
