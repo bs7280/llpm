@@ -19,6 +19,10 @@ VALID_EFFORTS = {"trivial", "small", "medium", "large", "xlarge"}
 
 CORE_FIELDS = {"id", "type", "title", "status", "priority", "parent", "blockers", "created", "updated", "completed", "tags"}
 
+# Ticket types that may carry `serves:` goal references (goal is a frontmatter
+# type, not a place -- refs are full vault stems, cross-repo by design)
+SERVES_TYPES = {"epic", "feature"}
+
 # Built-in type -> ID prefix mapping
 TYPE_PREFIXES = {
     "epic": "EPIC",
@@ -124,7 +128,7 @@ def validate_frontmatter(data: dict) -> list[str]:
         errors.append(f"ID '{ticket_id}' does not match type '{ticket_type}' (expected prefix '{expected_prefix}-')")
 
     # Validate list fields are lists
-    for field in ("blockers", "tags"):
+    for field in ("blockers", "tags", "serves"):
         val = data.get(field)
         if val is not None and not isinstance(val, list):
             errors.append(f"Field '{field}' must be a list, got {type(val).__name__}")

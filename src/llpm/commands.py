@@ -234,18 +234,18 @@ def _require_ticket(store: TicketStore, ticket_id: str) -> tuple[Path, dict, str
     return result
 
 
-def _ticket_to_dict(docs_root: Path, path: Path, fm: dict, body: str | None = None) -> dict:
+def _ticket_to_dict(store: TicketStore, path: Path, fm: dict, body: str | None = None) -> dict:
     """Serialize a ticket to the JSON output schema.
 
     If body is None, it is omitted (list mode). If provided, it is included (show mode).
     """
-    eff_status = parser.effective_status(docs_root, fm)
+    eff_status = parser.effective_status(store, fm)
     is_blocked = eff_status == "blocked"
 
-    children = parser.get_children(docs_root, fm["id"])
+    children = parser.get_children(store, fm["id"])
     child_ids = [c["id"] for c in children]
 
-    blocker_details = parser.get_blocker_details(docs_root, fm) if fm.get("blockers") else []
+    blocker_details = parser.get_blocker_details(store, fm) if fm.get("blockers") else []
 
     archived = "archive" in path.parts
 
@@ -264,6 +264,7 @@ def _ticket_to_dict(docs_root: Path, path: Path, fm: dict, body: str | None = No
             {"id": d["id"], "resolved": d["resolved"]}
             for d in blocker_details
         ],
+        "serves": fm.get("serves") or [],
         "tags": fm.get("tags") or [],
         "requires_human": fm.get("requires_human", False),
         "created": fm.get("created"),
@@ -357,7 +358,7 @@ def cmd_list(args) -> None:
         filtered.append((path, fm, eff_status))
 
     if use_json:
-        _json_out([_ticket_to_dict(docs_root, path, fm) for path, fm, _ in filtered])
+        _json_out([_ticket_to_dict(store, path, fm) for path, fm, _ in filtered])
         return
 
     if not filtered:
@@ -389,7 +390,7 @@ def cmd_board(args) -> None:
         result = []
         for col_name in ("blocked", "open", "in-progress", "review"):
             for path, fm in columns[col_name]:
-                result.append(_ticket_to_dict(docs_root, path, fm))
+                result.append(_ticket_to_dict(store, path, fm))
         _json_out(result)
         return
 
@@ -402,7 +403,9 @@ def cmd_board(args) -> None:
             for path, fm in items:
                 pri = fm.get("priority", "medium")
                 indicator = "!!!" if pri == "high" else " ! " if pri == "medium" else "   "
-                print(f"  {indicator} {fm['id']:<16} {fm['title']}")
+                serves = fm.get("serves") or []
+                serves_chip = f"  (serves: {', '.join(serves)})" if serves else ""
+                print(f"  {indicator} {fm['id']:<16} {fm['title']}{serves_chip}")
         print()
 
 
@@ -422,7 +425,7 @@ def cmd_backlog(args) -> None:
         result = []
         for section in ("planned", "draft"):
             for path, fm in sections[section]:
-                result.append(_ticket_to_dict(docs_root, path, fm))
+                result.append(_ticket_to_dict(store, path, fm))
         _json_out(result)
         return
 
@@ -447,7 +450,7 @@ def cmd_show(args) -> None:
     path, fm, body = _require_ticket(store, args.ticket_id)
 
     if getattr(args, "json", False):
-        _json_out(_ticket_to_dict(docs_root, path, fm, body=body))
+        _json_out(_ticket_to_dict(store, path, fm, body=body))
         return
 
     eff_status = parser.effective_status(store, fm)
@@ -484,6 +487,11 @@ def cmd_show(args) -> None:
         print(f"Blockers:  {', '.join(parts)}")
     else:
         print(f"Blockers:  -")
+
+    # Goal references (epics/features)
+    serves = fm.get("serves") or []
+    if serves or fm.get("type") in parser.SERVES_TYPES:
+        print(f"Serves:    {', '.join(serves) if serves else '-'}")
 
     print(f"Created:   {fm.get('created') or '-'}")
     print(f"Updated:   {fm.get('updated') or '-'}")
@@ -632,6 +640,7 @@ def cmd_set(args) -> None:
     REDIRECT = {
         "status": "Use 'llpm status'.",
         "blockers": "Use 'llpm blocker'.",
+        "serves": "Use 'llpm serves'.",
     }
 
     # Parse field=value pairs
@@ -698,6 +707,64 @@ def cmd_set(args) -> None:
 
     fm["updated"] = _today()
     store.write(path, fm, body)
+
+
+def _require_serves_capable(fm: dict) -> None:
+    """Exit with an error unless the ticket type can carry `serves:`."""
+    if fm.get("type") not in parser.SERVES_TYPES:
+        print(
+            f"Error: 'serves' is only valid on epics/features "
+            f"({fm['id']} is a {fm.get('type')}). Tasks serve goals via their parent.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+
+def cmd_serves_add(args) -> None:
+    store, docs_root = _resolve_store_and_root(args)
+
+    path, fm, body = _require_ticket(store, args.ticket_id)
+    _require_serves_capable(fm)
+
+    goal_stem = args.goal_stem.strip()
+    # Catch the common mistake of passing a ticket ID instead of a vault stem.
+    # Existence validation stays soft until type-keyed schema matching lands.
+    if parser.TICKET_ID_RE.match(goal_stem.upper()):
+        print(
+            f"Error: 'serves' holds full vault stems to goal notes "
+            f"(e.g. goals.unified-agent-platform), not ticket IDs. "
+            f"For ticket dependencies use 'llpm blocker'.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+    serves = fm.get("serves") or []
+    if goal_stem in serves:
+        print(f"{fm['id']}: already serves '{goal_stem}'.")
+        return
+
+    serves.append(goal_stem)
+    fm["serves"] = serves
+    fm["updated"] = _today()
+    store.write(path, fm, body)
+    print(f"{fm['id']}: now serves '{goal_stem}'")
+
+
+def cmd_serves_rm(args) -> None:
+    store, docs_root = _resolve_store_and_root(args)
+
+    path, fm, body = _require_ticket(store, args.ticket_id)
+
+    goal_stem = args.goal_stem.strip()
+    serves = fm.get("serves") or []
+    if goal_stem not in serves:
+        print(f"Error: {fm['id']} does not serve '{goal_stem}'.", file=sys.stderr)
+        raise SystemExit(1)
+
+    fm["serves"] = [s for s in serves if s != goal_stem]
+    fm["updated"] = _today()
+    store.write(path, fm, body)
+    print(f"{fm['id']}: no longer serves '{goal_stem}'")
 
 
 def cmd_blocker_add(args) -> None:

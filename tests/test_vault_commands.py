@@ -452,6 +452,61 @@ class TestVaultTodo:
 
 
 # ---------------------------------------------------------------------------
+# cmd_serves (FEAT-004)
+# ---------------------------------------------------------------------------
+
+class TestVaultServes:
+    def test_serves_add_round_trips(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed(fake, "FEAT-101", "A feature", ticket_type="feature")
+
+        _run("serves", "add", "FEAT-101", "goals.unified-agent-platform", docs=docs)
+
+        out = capsys.readouterr().out
+        assert "now serves" in out
+        fm, _ = fake.active["FEAT-101_A_FEATURE.md"]
+        assert fm["serves"] == ["goals.unified-agent-platform"]
+
+    def test_serves_task_rejected(self, vault_project):
+        docs, fake = vault_project
+        _seed(fake, "TASK-101", "A task")
+        with pytest.raises(SystemExit):
+            _run("serves", "add", "TASK-101", "goals.a", docs=docs)
+
+
+# ---------------------------------------------------------------------------
+# --json derived fields flow through the store seam, not the sentinel path
+# ---------------------------------------------------------------------------
+
+class TestVaultJsonDerivedFields:
+    def test_board_json_resolved_blocker_not_blocked(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed(fake, "TASK-101", "Done blocker", status="complete")
+        _seed(fake, "TASK-102", "Ready task", blockers=["TASK-101"])
+
+        _run("board", "--json", docs=docs)
+
+        import json
+        data = json.loads(capsys.readouterr().out)
+        t = next(t for t in data if t["id"] == "TASK-102")
+        assert t["effective_status"] == "open"
+        assert t["is_blocked"] is False
+        assert t["blockers"] == [{"id": "TASK-101", "resolved": True}]
+
+    def test_list_json_children_derived(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed(fake, "EPIC-001", "Parent epic", ticket_type="epic")
+        _seed(fake, "TASK-101", "Child task", parent="EPIC-001")
+
+        _run("list", "--json", docs=docs)
+
+        import json
+        data = json.loads(capsys.readouterr().out)
+        epic = next(t for t in data if t["id"] == "EPIC-001")
+        assert epic["children"] == ["TASK-101"]
+
+
+# ---------------------------------------------------------------------------
 # cmd_project
 # ---------------------------------------------------------------------------
 

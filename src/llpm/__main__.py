@@ -192,6 +192,29 @@ def _build_parser():
     p_bl.add_argument("ticket_id", help="Ticket ID to list blockers for")
     p_bl.add_argument("--json", action="store_true", help="Output as JSON object")
 
+    # -- serves --
+    p_serves = subparsers.add_parser(
+        "serves",
+        description=(
+            "Manage structured goal references on epics/features. 'serves' links a "
+            "ticket to any 'type: goal' note in the vault by its full stem (e.g. "
+            "goals.unified-agent-platform) -- cross-repo by design. Existence is "
+            "not validated (goals may live anywhere); ticket IDs are rejected "
+            "(use 'llpm blocker' for dependencies). Only epics and features can "
+            "serve goals -- tasks serve via their parent."
+        ),
+        help="Manage goal references on epics/features (add/rm)",
+    )
+    serves_sub = p_serves.add_subparsers(dest="serves_action")
+
+    p_sa = serves_sub.add_parser("add", help="Add a goal reference to an epic/feature")
+    p_sa.add_argument("ticket_id", help="The epic/feature that serves the goal")
+    p_sa.add_argument("goal_stem", help="Full vault stem of the goal note (e.g. goals.my-goal)")
+
+    p_sr = serves_sub.add_parser("rm", help="Remove a goal reference")
+    p_sr.add_argument("ticket_id", help="The ticket to remove the goal reference from")
+    p_sr.add_argument("goal_stem", help="The goal stem to remove")
+
     # -- archive --
     p_archive = subparsers.add_parser(
         "archive",
@@ -322,12 +345,20 @@ def _run(args, parser, subparsers) -> None:
         }
         if not args.blocker_action:
             # Print blocker subcommand help
-            for action in subparsers.choices:
-                if action == "blocker":
-                    subparsers.choices[action].print_help()
-                    break
+            subparsers.choices["blocker"].print_help()
             raise SystemExit(1)
         blocker_dispatch[args.blocker_action](args)
+        return
+
+    if args.command == "serves":
+        serves_dispatch = {
+            "add": commands.cmd_serves_add,
+            "rm": commands.cmd_serves_rm,
+        }
+        if not args.serves_action:
+            subparsers.choices["serves"].print_help()
+            raise SystemExit(1)
+        serves_dispatch[args.serves_action](args)
         return
 
     handler = dispatch.get(args.command)

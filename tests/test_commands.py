@@ -330,6 +330,87 @@ class TestSet:
         assert fm["title"] == "New Title"
 
 
+class TestServes:
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_serves_add_feature(self, mock_today, docs_root, capsys):
+        run_cli("serves", "add", "FEAT-002", "goals.unified-agent-platform", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "now serves 'goals.unified-agent-platform'" in out
+        fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
+        assert fm["serves"] == ["goals.unified-agent-platform"]
+        assert fm["updated"] == "2026-03-20"
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_serves_add_epic(self, mock_today, docs_root, capsys):
+        run_cli("serves", "add", "EPIC-001", "prj.marginalia.versions.v1", docs_root=docs_root)
+        fm, _ = parser.parse_document(docs_root / "tickets" / "EPIC-001_CLI_TOOLING.md")
+        assert fm["serves"] == ["prj.marginalia.versions.v1"]
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_serves_add_duplicate(self, mock_today, docs_root, capsys):
+        run_cli("serves", "add", "FEAT-002", "goals.a", docs_root=docs_root)
+        run_cli("serves", "add", "FEAT-002", "goals.a", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "already serves" in out
+        fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
+        assert fm["serves"] == ["goals.a"]
+
+    def test_serves_add_task_rejected(self, docs_root, capsys):
+        with pytest.raises(SystemExit):
+            run_cli("serves", "add", "TASK-001", "goals.a", docs_root=docs_root)
+        err = capsys.readouterr().err
+        assert "only valid on epics/features" in err
+
+    def test_serves_add_ticket_id_rejected(self, docs_root, capsys):
+        with pytest.raises(SystemExit):
+            run_cli("serves", "add", "FEAT-002", "FEAT-001", docs_root=docs_root)
+        err = capsys.readouterr().err
+        assert "full vault stems" in err
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_serves_rm(self, mock_today, docs_root, capsys):
+        run_cli("serves", "add", "FEAT-002", "goals.a", docs_root=docs_root)
+        run_cli("serves", "add", "FEAT-002", "goals.b", docs_root=docs_root)
+        run_cli("serves", "rm", "FEAT-002", "goals.a", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "no longer serves 'goals.a'" in out
+        fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
+        assert fm["serves"] == ["goals.b"]
+
+    def test_serves_rm_not_present(self, docs_root):
+        with pytest.raises(SystemExit):
+            run_cli("serves", "rm", "FEAT-002", "goals.nope", docs_root=docs_root)
+
+    def test_cannot_set_serves_via_set(self, docs_root, capsys):
+        with pytest.raises(SystemExit):
+            run_cli("set", "FEAT-002", "serves=goals.a", docs_root=docs_root)
+        err = capsys.readouterr().err
+        assert "llpm serves" in err
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_show_displays_serves(self, mock_today, docs_root, capsys):
+        run_cli("serves", "add", "FEAT-002", "goals.a", docs_root=docs_root)
+        capsys.readouterr()
+        run_cli("show", "FEAT-002", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "Serves:    goals.a" in out
+
+    def test_show_feature_without_serves_shows_dash(self, docs_root, capsys):
+        run_cli("show", "FEAT-002", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "Serves:    -" in out
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_board_shows_serves(self, mock_today, docs_root, capsys):
+        # FEAT-002 is in-progress, so it appears on the board
+        run_cli("serves", "add", "FEAT-002", "goals.a", docs_root=docs_root)
+        capsys.readouterr()
+        run_cli("board", docs_root=docs_root)
+        out = capsys.readouterr().out
+        line = next(l for l in out.splitlines() if "FEAT-002" in l)
+        assert "(serves: goals.a)" in line
+
+
 class TestArchive:
     def test_archive_single(self, docs_root, capsys):
         run_cli("archive", "FEAT-001", docs_root=docs_root)

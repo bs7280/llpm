@@ -41,8 +41,9 @@ class TestListJson:
         # All required fields present
         for key in (
             "id", "type", "title", "status", "effective_status", "is_blocked",
-            "priority", "effort", "parent", "children", "blockers", "tags",
-            "requires_human", "created", "updated", "completed", "archived", "path",
+            "priority", "effort", "parent", "children", "blockers", "serves",
+            "tags", "requires_human", "created", "updated", "completed",
+            "archived", "path",
         ):
             assert key in ticket, f"Missing key: {key}"
 
@@ -84,6 +85,17 @@ class TestListJson:
         resolved = {b["id"]: b["resolved"] for b in task["blockers"]}
         assert resolved["FEAT-001"] is True
         assert resolved["FEAT-002"] is False
+
+    def test_serves_defaults_empty(self, docs_root, capsys):
+        data = run_json("list", "--json", docs_root=docs_root, capsys=capsys)
+        assert all(t["serves"] == [] for t in data)
+
+    def test_serves_surfaced(self, docs_root, capsys):
+        run_cli("serves", "add", "FEAT-002", "goals.a", docs_root=docs_root)
+        capsys.readouterr()
+        data = run_json("list", "--json", docs_root=docs_root, capsys=capsys)
+        feat = next(t for t in data if t["id"] == "FEAT-002")
+        assert feat["serves"] == ["goals.a"]
 
     def test_filter_status(self, docs_root, capsys):
         data = run_json("list", "--json", "--status", "blocked", docs_root=docs_root, capsys=capsys)

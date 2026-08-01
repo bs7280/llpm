@@ -7,6 +7,7 @@ priority: medium  # low | medium | high
 effort: null  # trivial | small | medium | large | xlarge
 parent: null
 blockers: []
+serves: []  # full vault stems of goal notes this serves (cross-repo)
 created: "__DATE__"
 updated: "__DATE__"
 completed: null
