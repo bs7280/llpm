@@ -111,6 +111,25 @@ class TestValidation:
         errors = parser.validate_frontmatter(fm)
         assert any("Invalid effort" in e for e in errors)
 
+    def test_invalid_model_tier(self, docs_root):
+        path = docs_root / "tickets" / "FEAT-001_EXPANDED_FRONTMATTER.md"
+        fm, _ = parser.parse_document(path)
+        fm["model_tier"] = "turbo"
+        errors = parser.validate_frontmatter(fm)
+        assert any("Invalid model_tier" in e for e in errors)
+
+    def test_valid_model_tier(self, docs_root):
+        path = docs_root / "tickets" / "FEAT-001_EXPANDED_FRONTMATTER.md"
+        fm, _ = parser.parse_document(path)
+        fm["model_tier"] = "light"
+        assert parser.validate_frontmatter(fm) == []
+
+    def test_null_model_tier_ok(self, docs_root):
+        path = docs_root / "tickets" / "FEAT-001_EXPANDED_FRONTMATTER.md"
+        fm, _ = parser.parse_document(path)
+        fm["model_tier"] = None
+        assert parser.validate_frontmatter(fm) == []
+
     def test_id_prefix_mismatch(self, docs_root):
         path = docs_root / "tickets" / "FEAT-001_EXPANDED_FRONTMATTER.md"
         fm, _ = parser.parse_document(path)

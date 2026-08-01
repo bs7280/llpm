@@ -258,6 +258,7 @@ def _ticket_to_dict(store: TicketStore, path: Path, fm: dict, body: str | None =
         "is_blocked": is_blocked,
         "priority": fm["priority"],
         "effort": fm.get("effort"),
+        "model_tier": fm.get("model_tier"),
         "parent": fm.get("parent"),
         "children": child_ids,
         "blockers": [
@@ -418,9 +419,11 @@ def cmd_board(args) -> None:
             for path, fm in items:
                 pri = fm.get("priority", "medium")
                 indicator = "!!!" if pri == "high" else " ! " if pri == "medium" else "   "
+                tier = fm.get("model_tier")
+                tier_chip = f" [{tier}]" if tier else ""
                 serves = fm.get("serves") or []
                 serves_chip = f"  (serves: {', '.join(serves)})" if serves else ""
-                print(f"  {indicator} {fm['id']:<16} {fm['title']}{serves_chip}")
+                print(f"  {indicator} {fm['id']:<16} {fm['title']}{tier_chip}{serves_chip}")
         print()
 
 
@@ -478,6 +481,8 @@ def cmd_show(args) -> None:
 
     if "effort" in fm:
         print(f"Effort:    {fm['effort'] or '-'}")
+    if fm.get("model_tier"):
+        print(f"Tier:      {fm['model_tier']}")
     if fm.get("requires_human"):
         print(f"Requires:  HUMAN ACTION")
 
@@ -708,6 +713,13 @@ def cmd_set(args) -> None:
                 value = None
             elif value not in parser.VALID_EFFORTS:
                 print(f"Error: Invalid effort '{value}'. Must be one of: {', '.join(sorted(parser.VALID_EFFORTS))}", file=sys.stderr)
+                raise SystemExit(1)
+
+        if field == "model_tier":
+            if value.lower() in ("null", "none"):
+                value = None
+            elif value not in parser.VALID_MODEL_TIERS:
+                print(f"Error: Invalid model_tier '{value}'. Must be one of: {', '.join(sorted(parser.VALID_MODEL_TIERS))}", file=sys.stderr)
                 raise SystemExit(1)
 
         # Handle null/none
@@ -1327,6 +1339,7 @@ def cmd_project(args) -> None:
         "valid_types": valid_types,
         "valid_priorities": sorted(parser.VALID_PRIORITIES),
         "valid_efforts": sorted(parser.VALID_EFFORTS),
+        "valid_model_tiers": sorted(parser.VALID_MODEL_TIERS),
         "counts": {
             "total": len(tickets),
             "by_status": by_status,

@@ -868,6 +868,63 @@ class TestStoreDiscovery:
         assert cfg["kind"] == "dir"
 
 
+class TestModelTierValidation:
+    """Tests for TASK-007: model_tier enum validation + board surfacing."""
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_set_valid_tier(self, mock_today, docs_root, capsys):
+        run_cli("set", "FEAT-002", "model_tier=light", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "model_tier = light" in out
+        fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
+        assert fm["model_tier"] == "light"
+
+    def test_set_invalid_tier_errors(self, docs_root, capsys):
+        with pytest.raises(SystemExit):
+            run_cli("set", "FEAT-002", "model_tier=turbo", docs_root=docs_root)
+        err = capsys.readouterr().err
+        assert "Invalid model_tier 'turbo'" in err
+        assert "heavy, light, standard" in err
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_set_null_clears_tier(self, mock_today, docs_root, capsys):
+        run_cli("set", "FEAT-002", "model_tier=standard", docs_root=docs_root)
+        run_cli("set", "FEAT-002", "model_tier=null", docs_root=docs_root)
+        fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
+        assert fm["model_tier"] is None
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_board_shows_tier_chip(self, mock_today, docs_root, capsys):
+        # FEAT-002 is in-progress, so it appears on the board
+        run_cli("set", "FEAT-002", "model_tier=heavy", docs_root=docs_root)
+        capsys.readouterr()
+        run_cli("board", docs_root=docs_root)
+        out = capsys.readouterr().out
+        line = next(l for l in out.splitlines() if "FEAT-002" in l)
+        assert "[heavy]" in line
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_show_displays_tier(self, mock_today, docs_root, capsys):
+        run_cli("set", "FEAT-002", "model_tier=standard", docs_root=docs_root)
+        capsys.readouterr()
+        run_cli("show", "FEAT-002", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "Tier:      standard" in out
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_model_tier_in_json(self, mock_today, docs_root, capsys):
+        import json as _json
+        run_cli("set", "FEAT-002", "model_tier=light", docs_root=docs_root)
+        capsys.readouterr()
+        run_cli("list", "--json", docs_root=docs_root)
+        data = _json.loads(capsys.readouterr().out)
+        feat = next(t for t in data if t["id"] == "FEAT-002")
+        assert feat["model_tier"] == "light"
+        # Absent tier serializes as null, key always present
+        epic = next(t for t in data if t["id"] == "EPIC-001")
+        assert epic["model_tier"] is None
+
+
 class TestModelTierDisplay:
     """Tests for TASK-002: model_tier chip in ls/backlog output."""
 

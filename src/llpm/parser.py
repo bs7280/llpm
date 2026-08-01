@@ -16,6 +16,7 @@ VALID_STATUSES = {"draft", "planned", "open", "in-progress", "review", "complete
 RESOLVED_STATUSES = {"complete", "closed"}
 VALID_PRIORITIES = {"low", "medium", "high"}
 VALID_EFFORTS = {"trivial", "small", "medium", "large", "xlarge"}
+VALID_MODEL_TIERS = {"heavy", "standard", "light"}
 
 CORE_FIELDS = {"id", "type", "title", "status", "priority", "parent", "blockers", "created", "updated", "completed", "tags"}
 
@@ -119,6 +120,11 @@ def validate_frontmatter(data: dict) -> list[str]:
     effort = data.get("effort")
     if effort is not None and effort not in VALID_EFFORTS:
         errors.append(f"Invalid effort: '{effort}'. Must be one of: {', '.join(sorted(VALID_EFFORTS))}")
+
+    # model_tier is optional -- validate only if present and non-null
+    model_tier = data.get("model_tier")
+    if model_tier is not None and model_tier not in VALID_MODEL_TIERS:
+        errors.append(f"Invalid model_tier: '{model_tier}'. Must be one of: {', '.join(sorted(VALID_MODEL_TIERS))}")
 
     # Validate ID prefix matches type
     ticket_id = data["id"]
