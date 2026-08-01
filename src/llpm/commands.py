@@ -56,13 +56,16 @@ def _read_body(args) -> str | None:
 def _find_repo_config() -> dict | None:
     """Walk upward from CWD to find .llpm/config.toml.
 
-    Returns a config dict on success (keys: ``kind``, plus kind-specific keys),
-    or None if no config file was found.
+    Returns a config dict on success (keys: ``kind``, plus kind-specific keys,
+    plus ``"intake"``), or None if no config file was found.
 
     Supported kinds:
     - ``"dir"``: local filesystem store; includes ``"docs_root"`` (Path).
     - ``"mdtree"``: vault HTTP store; includes ``"base_url"`` (str),
       ``"repo_stem"`` (str), and ``"ca"`` (str path to a CA bundle, or None).
+
+    ``"intake"`` is the raw ``[intake]`` table (e.g. ``{"auto_approve": [...]}``,
+    FEAT-011's policy-as-data) -- ``{}`` when the section is absent.
     """
     current = Path.cwd()
     while True:
@@ -75,13 +78,14 @@ def _find_repo_config() -> dict | None:
                 print(f"Error: Failed to parse {config_path}: {e}", file=sys.stderr)
                 raise SystemExit(1)
 
+            intake = data.get("intake", {})
             store_section = data.get("store", {})
             kind = store_section.get("kind", "dir")
 
             if kind == "dir":
                 root_str = store_section.get("root", "./llpm")
                 docs_root = (current / root_str).resolve()
-                return {"kind": "dir", "docs_root": docs_root}
+                return {"kind": "dir", "docs_root": docs_root, "intake": intake}
 
             if kind == "mdtree":
                 base_url = store_section.get("url")
@@ -103,6 +107,7 @@ def _find_repo_config() -> dict | None:
                     "base_url": base_url,
                     "repo_stem": repo_stem,
                     "ca": ca,
+                    "intake": intake,
                 }
 
             print(
@@ -153,6 +158,15 @@ def _resolve_docs_root(args) -> Path:
         return cfg["docs_root"]
     # mdtree: return a non-existent sentinel path so callers don't crash
     return Path("/dev/null/mdtree-sentinel")
+
+
+def _resolve_intake_config(args) -> dict:
+    """Resolve the ``[intake]`` policy table from ``.llpm/config.toml``
+    (FEAT-011: policy-as-data, not hardcoded). ``{}`` -- so an empty
+    auto-approve list -- when no config file/section is found: agent
+    tickets land draft by default until a project explicitly opts a kind in.
+    """
+    return _resolve_store_config(args).get("intake") or {}
 
 
 def _templates_source() -> Path:
@@ -285,6 +299,52 @@ def _inject_provenance(content: str, origin: str, created_by: str | None) -> str
     parts = content.split("---", 2)
     fm_block = parts[1].rstrip("\n") + "\n" + "\n".join(lines) + "\n"
     return "---" + fm_block + "---" + parts[2]
+
+
+def _intake_auto_approved(ticket_type: str, args) -> bool:
+    """True if `ticket_type` is on the project's intake auto-approve list
+    (FEAT-011 `[intake] auto_approve = [...]` in .llpm/config.toml).
+
+    "Kind" for this policy is the ticket `type` -- there's no separate kind
+    taxonomy in the schema, and type is the closest existing thing a project
+    could plausibly want to distinguish (e.g. auto-approving `research`
+    spikes while still drafting `feature` proposals)."""
+    auto_approve = _resolve_intake_config(args).get("auto_approve") or []
+    return ticket_type in auto_approve
+
+
+def _parent_chain_serves_goal(store: TicketStore, ticket_id: str) -> bool:
+    """True if `ticket_id` or an ancestor (walking `parent`) declares a
+    non-empty `serves`. Mirrors `_after_reaches`'s walk-by-read style rather
+    than `parser._goal_stems_served`'s bulk `by_id` map -- create-time
+    validation only needs one chain, not every ticket on the board."""
+    seen: set[str] = set()
+    current = ticket_id
+    while current:
+        key = current.upper()
+        if key in seen:
+            break  # guard against a parent cycle
+        seen.add(key)
+        found = store.read(current)
+        if found is None:
+            break
+        _, fm, _ = found
+        if fm.get("serves"):
+            return True
+        current = fm.get("parent")
+    return False
+
+
+def _new_ticket_attaches_to_goal(
+    store: TicketStore, ticket_type: str, parent_id: str | None, serves_requested: bool
+) -> bool:
+    """True if a ticket about to be created would attach to a goal: its own
+    `--serves` (epics/features only), or an ancestor's via `--parent`."""
+    if serves_requested and ticket_type in parser.SERVES_TYPES:
+        return True
+    if parent_id and _parent_chain_serves_goal(store, parent_id):
+        return True
+    return False
 
 
 def _harvest_commits(ticket_id: str) -> list[str]:
@@ -674,12 +734,45 @@ def cmd_create(args) -> None:
             print(f"Error: Parent ticket '{parent_id}' not found.", file=sys.stderr)
             raise SystemExit(1)
 
+    serves = getattr(args, "serves", None)
+    if serves and ticket_type not in parser.SERVES_TYPES:
+        print(
+            f"Error: 'serves' is only valid on epics/features ('{ticket_type}' "
+            f"cannot carry it). Tasks serve goals via their parent.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
     # Read body
     body = _read_body(args)
     today = _today()
 
     # Determine status
     status = "open" if body else "draft"
+
+    # Provenance (FEAT-007) -- resolved once, up front: the intake policy
+    # below needs origin before status is finalized.
+    origin, created_by = _resolve_provenance(args)
+
+    # Ticket-intake policy (FEAT-011): agent-proposed tickets land draft
+    # unless their kind is explicitly auto-approved, and must attach to a
+    # goal (serves/parent chain) or opt into the triage pool -- "don't
+    # propose shit I don't want" as validation, not vibes. Human-authored
+    # tickets are unaffected (the policy exists to bound agent proposals).
+    triage = getattr(args, "triage", False)
+    if origin == "agent":
+        if not _intake_auto_approved(ticket_type, args):
+            status = "draft"
+        if not triage and not _new_ticket_attaches_to_goal(store, ticket_type, parent_id, bool(serves)):
+            print(
+                "Error: agent-created tickets must attach to a goal -- pass "
+                "--serves (epics/features only) or --parent pointing at a "
+                "ticket whose chain already serves one -- or pass --triage "
+                "to land in the explicit triage pool for human review. "
+                "See FEAT-011.",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
 
     # Atomic create with O_EXCL retry
     max_retries = 3
@@ -726,9 +819,16 @@ def cmd_create(args) -> None:
         if parent_id:
             content = content.replace("parent: null", f"parent: {parent_id}", 1)
 
+        if serves:
+            serve_list = [s.strip() for s in serves.split(",")]
+            serve_yaml = "[" + ", ".join(serve_list) + "]"
+            content = content.replace("serves: []", f"serves: {serve_yaml}", 1)
+
         tags = getattr(args, "tags", None)
-        if tags:
-            tag_list = [t.strip() for t in tags.split(",")]
+        tag_list = [t.strip() for t in tags.split(",")] if tags else []
+        if triage and "triage" not in tag_list:
+            tag_list.append("triage")
+        if tag_list:
             tag_yaml = "[" + ", ".join(tag_list) + "]"
             content = content.replace("tags: []", f"tags: {tag_yaml}", 1)
 
@@ -744,7 +844,6 @@ def cmd_create(args) -> None:
                 content = parts[0] + "---" + parts[1] + "---\n" + body
 
         # Provenance + ownership (FEAT-007)
-        origin, created_by = _resolve_provenance(args)
         content = _inject_provenance(content, origin, created_by)
 
         # Atomic file creation
@@ -1529,6 +1628,26 @@ def cmd_goals(args) -> None:
     print(f"-- {len(gaps)} unplanned gap(s) --")
     for g in gaps:
         print(f"  {g['stem']}  {g['title']}")
+
+
+def cmd_orphans(args) -> None:
+    store, docs_root = _resolve_store_and_root(args)
+
+    use_json = getattr(args, "json", False)
+    orphans = parser.get_orphans(store)
+
+    if use_json:
+        _json_out(orphans)
+        return
+
+    if not orphans:
+        print("No orphaned agent-created tickets.")
+        return
+
+    print(f"-- {len(orphans)} orphaned agent-created ticket(s) (no goal attachment, not triaged) --")
+    for o in orphans:
+        by = f"  (created_by: {o['created_by']})" if o.get("created_by") else ""
+        print(f"  {o['id']:<12} {o['title']}  [{o['status']}]{by}")
 
 
 def cmd_skills(args) -> None:

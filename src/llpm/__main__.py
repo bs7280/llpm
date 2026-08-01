@@ -108,7 +108,10 @@ def _build_parser():
             "Without a body, ticket is created as 'draft' with the template body as placeholder. "
             "With a body (--body, --body-file, or piped stdin), ticket is created as 'open' "
             "and the body replaces the template content. File creation is atomic (O_EXCL) "
-            "to prevent ID collisions across parallel agents."
+            "to prevent ID collisions across parallel agents. Agent-origin tickets (FEAT-011 "
+            "intake policy) always land 'draft' unless their type is on the project's "
+            "[intake] auto_approve list, and must attach to a goal via --serves/--parent or "
+            "pass --triage -- 'llpm orphans' reports ones that later drift unattached."
         ),
         help="Create a new ticket from a template",
     )
@@ -143,6 +146,23 @@ def _build_parser():
     p_create.add_argument(
         "--created-by", dest="created_by", metavar="ID",
         help="Provenance: agent/session id. Default: LLPM_CREATED_BY env var.",
+    )
+    p_create.add_argument(
+        "--serves", metavar="GOAL_STEMS",
+        help=(
+            "Comma-separated full stems of goal notes this ticket serves "
+            "(epics/features only). For agent-origin tickets this (or "
+            "--parent chained to a goal-serving ancestor) satisfies the "
+            "FEAT-011 intake policy's goal-attachment requirement."
+        ),
+    )
+    p_create.add_argument(
+        "--triage", action="store_true",
+        help=(
+            "Explicitly land in the triage pool instead of attaching to a "
+            "goal (tags the ticket 'triage'). Agent-origin tickets must "
+            "pass this, --serves, or a goal-attached --parent (FEAT-011)."
+        ),
     )
 
     # -- status --
@@ -359,6 +379,21 @@ def _build_parser():
     )
     p_goals.add_argument("--json", action="store_true", help="Output as JSON array")
 
+    # -- orphans --
+    p_orphans = subparsers.add_parser(
+        "orphans",
+        description=(
+            "Report agent-created tickets (origin: agent) that attach to no goal -- "
+            "neither their own 'serves' nor any ancestor's -- and aren't tagged "
+            "'triage'. 'llpm create' gates this at creation time (FEAT-011), but the "
+            "graph can drift afterward (e.g. an ancestor's 'serves' edge removed via "
+            "'llpm serves rm'); this is the standing report for that drift. "
+            "Human-authored tickets are never flagged -- they were never gated."
+        ),
+        help="Report agent-created tickets with no goal attachment (FEAT-011)",
+    )
+    p_orphans.add_argument("--json", action="store_true", help="Output as JSON array")
+
     # -- project --
     p_project = subparsers.add_parser(
         "project",
@@ -416,6 +451,7 @@ def _run(args, parser, subparsers) -> None:
         "archive": commands.cmd_archive,
         "delete": commands.cmd_delete,
         "goals": commands.cmd_goals,
+        "orphans": commands.cmd_orphans,
         "project": commands.cmd_project,
         "skills": commands.cmd_skills,
         "todo": commands.cmd_todo,

@@ -349,8 +349,10 @@ class TestProvenanceCreate:
 
     @patch.object(commands, "_today", return_value="2026-03-20")
     def test_agent_flags(self, mock_today, docs_root, capsys):
+        # --triage: FEAT-011 requires agent-origin tickets to attach to a
+        # goal or explicitly triage; unrelated to what this test checks.
         run_cli("create", "task", "Agent task", "--origin", "agent",
-                "--created-by", "session-abc123", docs_root=docs_root)
+                "--created-by", "session-abc123", "--triage", docs_root=docs_root)
         fm, _ = parser.parse_document(parser.find_ticket_by_id(docs_root, "TASK-002"))
         assert fm["origin"] == "agent"
         assert fm["created_by"] == "session-abc123"
@@ -358,7 +360,7 @@ class TestProvenanceCreate:
     @patch.object(commands, "_today", return_value="2026-03-20")
     def test_env_created_by_infers_agent(self, mock_today, docs_root, capsys, monkeypatch):
         monkeypatch.setenv("LLPM_CREATED_BY", "session-env-9")
-        run_cli("create", "task", "Env agent task", docs_root=docs_root)
+        run_cli("create", "task", "Env agent task", "--triage", docs_root=docs_root)
         fm, _ = parser.parse_document(parser.find_ticket_by_id(docs_root, "TASK-002"))
         assert fm["origin"] == "agent"
         assert fm["created_by"] == "session-env-9"
@@ -388,7 +390,7 @@ class TestProvenanceCreate:
 
     @patch.object(commands, "_today", return_value="2026-03-20")
     def test_created_ticket_validates(self, mock_today, docs_root, capsys):
-        run_cli("create", "task", "Valid task", "--created-by", "s-1", docs_root=docs_root)
+        run_cli("create", "task", "Valid task", "--created-by", "s-1", "--triage", docs_root=docs_root)
         fm, _ = parser.parse_document(parser.find_ticket_by_id(docs_root, "TASK-002"))
         assert parser.validate_frontmatter(fm) == []
 
@@ -1143,3 +1145,168 @@ class TestModelTierDisplay:
         for tmpl_name in ("task.md", "feature.md", "epic.md", "research.md"):
             content = (templates_dir / tmpl_name).read_text(encoding="utf-8")
             assert "model_tier:" in content, f"{tmpl_name} missing model_tier field"
+
+
+# ---------------------------------------------------------------------------
+# Ticket-intake policy (FEAT-011)
+# ---------------------------------------------------------------------------
+
+class TestCreateIntakePolicy:
+    """Agent-origin tickets land draft unless auto-approved, and must attach
+    to a goal (serves/parent chain) or --triage. Human origin is unaffected."""
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_human_origin_bypasses_policy(self, mock_today, docs_root, capsys):
+        # No --triage/--serves/--parent -- the policy only gates agent origin.
+        run_cli("create", "task", "Human idea", "--origin", "human", docs_root=docs_root)
+        fm, _ = parser.parse_document(parser.find_ticket_by_id(docs_root, "TASK-002"))
+        assert fm["status"] == "draft"
+
+    def test_agent_origin_unattached_rejected(self, docs_root, capsys):
+        with pytest.raises(SystemExit):
+            run_cli("create", "task", "Orphan idea", "--origin", "agent",
+                    "--created-by", "s-1", docs_root=docs_root)
+        err = capsys.readouterr().err
+        assert "must attach to a goal" in err
+        assert parser.find_ticket_by_id(docs_root, "TASK-002") is None  # nothing created
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_agent_origin_triage_allowed(self, mock_today, docs_root, capsys):
+        run_cli("create", "task", "Needs triage", "--origin", "agent",
+                "--created-by", "s-1", "--triage", docs_root=docs_root)
+        fm, _ = parser.parse_document(parser.find_ticket_by_id(docs_root, "TASK-002"))
+        assert fm["tags"] == ["triage"]
+        assert fm["status"] == "draft"
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_agent_origin_serves_on_feature_allowed(self, mock_today, docs_root, capsys):
+        run_cli("create", "feature", "New capability", "--origin", "agent",
+                "--created-by", "s-1", "--serves", "goals.my-goal", docs_root=docs_root)
+        fm, _ = parser.parse_document(parser.find_ticket_by_id(docs_root, "FEAT-003"))
+        assert fm["serves"] == ["goals.my-goal"]
+
+    def test_serves_on_task_rejected(self, docs_root, capsys):
+        with pytest.raises(SystemExit):
+            run_cli("create", "task", "Bad", "--serves", "goals.x", docs_root=docs_root)
+        err = capsys.readouterr().err
+        assert "only valid on epics/features" in err
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_agent_origin_parent_chain_attaches(self, mock_today, docs_root, capsys):
+        run_cli("create", "epic", "Umbrella", "--origin", "agent", "--created-by", "s-1",
+                "--serves", "goals.my-goal", docs_root=docs_root)
+        run_cli("create", "task", "Child of umbrella", "--origin", "agent",
+                "--created-by", "s-1", "--parent", "EPIC-002", docs_root=docs_root)
+        fm, _ = parser.parse_document(parser.find_ticket_by_id(docs_root, "TASK-002"))
+        assert fm["parent"] == "EPIC-002"
+
+    def test_agent_origin_parent_without_goal_still_rejected(self, docs_root, capsys):
+        # FEAT-001 (fixture) has no `serves` -- attaching via it must still fail.
+        with pytest.raises(SystemExit):
+            run_cli("create", "task", "Orphan child", "--origin", "agent",
+                    "--created-by", "s-1", "--parent", "FEAT-001", docs_root=docs_root)
+
+
+class TestIntakeAutoApproveConfig:
+    """[intake] auto_approve in .llpm/config.toml (FEAT-011: policy-as-data).
+
+    Needs config-file discovery, so these bypass the --docs-root flag (which
+    short-circuits _resolve_store_config before it ever reads config.toml)
+    and chdir into a fresh project instead, mirroring TestConfigTomlDiscovery
+    in test_mdtreestore.py.
+    """
+
+    def _init_project(self, tmp_path, monkeypatch, auto_approve):
+        monkeypatch.chdir(tmp_path)
+        config_dir = tmp_path / ".llpm"
+        config_dir.mkdir()
+        approve_toml = ", ".join(f'"{k}"' for k in auto_approve)
+        (config_dir / "config.toml").write_text(
+            f'[store]\nkind = "dir"\nroot = "./llpm"\n\n'
+            f"[intake]\nauto_approve = [{approve_toml}]\n"
+        )
+        main(["init"])
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_auto_approved_kind_bypasses_draft(self, mock_today, tmp_path, monkeypatch, capsys):
+        self._init_project(tmp_path, monkeypatch, ["task"])
+        main(["create", "task", "Pre-vetted", "--origin", "agent", "--created-by", "s-1",
+              "--triage", "--body", "some body text"])
+        fm, _ = parser.parse_document(parser.find_ticket_by_id(tmp_path / "llpm", "TASK-001"))
+        assert fm["status"] == "open"  # body given + auto-approved kind
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_non_approved_kind_still_drafts_despite_body(self, mock_today, tmp_path, monkeypatch, capsys):
+        self._init_project(tmp_path, monkeypatch, ["research"])
+        main(["create", "task", "Not vetted", "--origin", "agent", "--created-by", "s-1",
+              "--triage", "--body", "some body text"])
+        fm, _ = parser.parse_document(parser.find_ticket_by_id(tmp_path / "llpm", "TASK-001"))
+        assert fm["status"] == "draft"  # forced despite body: "task" isn't auto-approved
+
+
+# ---------------------------------------------------------------------------
+# cmd_orphans (FEAT-011)
+# ---------------------------------------------------------------------------
+
+class TestOrphans:
+    def test_no_orphans(self, docs_root, capsys):
+        run_cli("orphans", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "No orphaned agent-created tickets." in out
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_unattached_agent_ticket_reported(self, mock_today, docs_root, capsys):
+        run_cli("create", "task", "Drifted idea", "--origin", "agent",
+                "--created-by", "s-1", "--triage", docs_root=docs_root)
+        # Simulate drift: the triage tag gets cleared without a goal ever attached.
+        path = parser.find_ticket_by_id(docs_root, "TASK-002")
+        fm, body = parser.parse_document(path)
+        fm["tags"] = []
+        parser.write_document(path, fm, body)
+
+        run_cli("orphans", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "1 orphaned agent-created ticket(s)" in out
+        assert "TASK-002" in out
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_triaged_ticket_not_reported(self, mock_today, docs_root, capsys):
+        run_cli("create", "task", "Needs triage", "--origin", "agent",
+                "--created-by", "s-1", "--triage", docs_root=docs_root)
+        run_cli("orphans", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "No orphaned agent-created tickets." in out
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_goal_attached_ticket_not_reported(self, mock_today, docs_root, capsys):
+        run_cli("create", "feature", "New capability", "--origin", "agent",
+                "--created-by", "s-1", "--serves", "goals.my-goal", docs_root=docs_root)
+        run_cli("orphans", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "No orphaned agent-created tickets." in out
+
+    def test_human_origin_never_reported(self, docs_root, capsys):
+        # FEAT-001/EPIC-001/etc in the fixture are unattached and human-origin
+        # (no `origin` field at all) -- never flagged, the policy never gated them.
+        run_cli("orphans", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "No orphaned agent-created tickets." in out
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_json_output(self, mock_today, docs_root, capsys):
+        run_cli("create", "task", "Drifted idea", "--origin", "agent",
+                "--created-by", "s-1", "--triage", docs_root=docs_root)
+        path = parser.find_ticket_by_id(docs_root, "TASK-002")
+        fm, body = parser.parse_document(path)
+        fm["tags"] = []
+        parser.write_document(path, fm, body)
+        capsys.readouterr()  # discard the "Created TASK-002..." output above
+
+        run_cli("orphans", "--json", docs_root=docs_root)
+
+        import json
+        out = capsys.readouterr().out
+        data = json.loads(out)
+        assert len(data) == 1
+        assert data[0]["id"] == "TASK-002"
+        assert data[0]["created_by"] == "s-1"

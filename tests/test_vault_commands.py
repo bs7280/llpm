@@ -103,7 +103,7 @@ class FakeStore:
 
 
 def _seed(store, ticket_id, title, *, ticket_type="task", status="open",
-          parent=None, blockers=None, serves=None):
+          parent=None, blockers=None, serves=None, tags=None, origin=None, created_by=None):
     fm = {
         "id": ticket_id,
         "type": ticket_type,
@@ -115,10 +115,14 @@ def _seed(store, ticket_id, title, *, ticket_type="task", status="open",
         "created": "2026-01-01",
         "updated": "2026-01-01",
         "completed": None,
-        "tags": [],
+        "tags": tags or [],
     }
     if serves is not None:
         fm["serves"] = serves
+    if origin is not None:
+        fm["origin"] = origin
+    if created_by is not None:
+        fm["created_by"] = created_by
     slug = title.upper().replace(" ", "_")
     store.active[f"{ticket_id}_{slug}.md"] = (fm, f"# {title}\n")
 
@@ -568,6 +572,48 @@ class TestVaultGoals:
 
 
 # ---------------------------------------------------------------------------
+# cmd_orphans (FEAT-011)
+# ---------------------------------------------------------------------------
+
+class TestVaultOrphans:
+    def test_no_orphans(self, vault_project, capsys):
+        docs, fake = vault_project
+        _run("orphans", docs=docs)
+        out = capsys.readouterr().out
+        assert "No orphaned agent-created tickets." in out
+
+    def test_unattached_agent_ticket_reported(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed(fake, "TASK-101", "Drifted idea", origin="agent", created_by="s-1")
+        _run("orphans", docs=docs)
+        out = capsys.readouterr().out
+        assert "1 orphaned agent-created ticket(s)" in out
+        assert "TASK-101" in out
+
+    def test_triaged_ticket_not_reported(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed(fake, "TASK-101", "Needs triage", origin="agent", created_by="s-1", tags=["triage"])
+        _run("orphans", docs=docs)
+        out = capsys.readouterr().out
+        assert "No orphaned agent-created tickets." in out
+
+    def test_goal_attached_ticket_not_reported(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed(fake, "FEAT-101", "New capability", ticket_type="feature",
+              origin="agent", created_by="s-1", serves=["goals.my-goal"])
+        _run("orphans", docs=docs)
+        out = capsys.readouterr().out
+        assert "No orphaned agent-created tickets." in out
+
+    def test_human_origin_never_reported(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed(fake, "TASK-101", "Human idea")  # no origin set
+        _run("orphans", docs=docs)
+        out = capsys.readouterr().out
+        assert "No orphaned agent-created tickets." in out
+
+
+# ---------------------------------------------------------------------------
 # cmd_waits + cross-board effective status (FEAT-005)
 # ---------------------------------------------------------------------------
 
@@ -800,7 +846,9 @@ class TestVaultProvenance:
         monkeypatch.setenv("LLPM_CREATED_BY", "dispatch-run-42")
 
         with patch.object(commands, "_today", return_value="2026-08-01"):
-            _run("create", "task", "Agent-made vault task", docs=docs)
+            # --triage: FEAT-011 requires agent-origin tickets to attach to a
+            # goal or explicitly triage; unrelated to what this test checks.
+            _run("create", "task", "Agent-made vault task", "--triage", docs=docs)
 
         _, fm, _ = fake.read("TASK-001")
         assert fm["managed_by"] == "llpm"
@@ -827,6 +875,34 @@ class TestVaultProvenance:
         assert "Captured 1 commit(s)" in out
         fm, _ = fake.active["TASK-101_DONE_WORK.md"]
         assert fm["commits"] == ["deadbeef"]
+
+
+class TestVaultCreateIntakePolicy:
+    """FEAT-011's create-time gate, exercised against the store-agnostic
+    _new_ticket_attaches_to_goal/_parent_chain_serves_goal helpers via
+    FakeStore -- proves the gate isn't LocalDirStore-specific."""
+
+    def test_unattached_agent_ticket_rejected(self, vault_project, capsys):
+        docs, fake = vault_project
+        with pytest.raises(SystemExit):
+            _run("create", "task", "Orphan idea", "--origin", "agent",
+                 "--created-by", "s-1", docs=docs)
+        assert fake.read("TASK-001") is None
+
+    def test_triage_bypasses_gate(self, vault_project, capsys):
+        docs, fake = vault_project
+        _run("create", "task", "Needs triage", "--origin", "agent",
+             "--created-by", "s-1", "--triage", docs=docs)
+        _, fm, _ = fake.read("TASK-001")
+        assert fm["tags"] == ["triage"]
+
+    def test_parent_chain_serves_goal_attaches(self, vault_project, capsys):
+        docs, fake = vault_project
+        _seed(fake, "EPIC-101", "Umbrella", ticket_type="epic", serves=["goals.my-goal"])
+        _run("create", "task", "Child of umbrella", "--origin", "agent",
+             "--created-by", "s-1", "--parent", "EPIC-101", docs=docs)
+        _, fm, _ = fake.read("TASK-001")
+        assert fm["parent"] == "EPIC-101"
 
 
 # ---------------------------------------------------------------------------

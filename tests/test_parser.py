@@ -408,3 +408,51 @@ class TestGoalRollup:
         _write_goal(docs_root, "GOAL-001_MY_GOAL.md", title="My Goal", status="stamped")
         rollup = parser.get_goal_rollup(docs_root)
         assert [g["stamped"] for g in rollup] == [True, False]
+
+
+# -- Orphan report (FEAT-011) --
+
+def _write_agent_ticket(docs_root: Path, filename: str, *, ticket_type="task",
+                         parent=None, tags=None, serves=None) -> None:
+    path = docs_root / "tickets" / filename
+    fm = {
+        "id": path.stem.split("_")[0], "type": ticket_type, "title": "An agent idea",
+        "status": "draft", "priority": "medium", "parent": parent, "blockers": [],
+        "created": "2026-01-01", "updated": "2026-01-01", "completed": None,
+        "tags": tags or [], "origin": "agent", "created_by": "session-1",
+    }
+    if serves is not None:
+        fm["serves"] = serves
+    parser.write_document(path, fm, "# An agent idea\n")
+
+
+class TestOrphanReport:
+    def test_unattached_agent_ticket_is_an_orphan(self, docs_root):
+        _write_agent_ticket(docs_root, "TASK-002_ORPHAN.md")
+        orphans = parser.get_orphans(docs_root)
+        assert [o["id"] for o in orphans] == ["TASK-002"]
+
+    def test_triaged_ticket_excluded(self, docs_root):
+        _write_agent_ticket(docs_root, "TASK-002_TRIAGED.md", tags=["triage"])
+        assert parser.get_orphans(docs_root) == []
+
+    def test_own_serves_excludes(self, docs_root):
+        _write_agent_ticket(docs_root, "FEAT-003_ATTACHED.md", ticket_type="feature",
+                             serves=["goals.a"])
+        assert parser.get_orphans(docs_root) == []
+
+    def test_inherited_serves_via_parent_excludes(self, docs_root):
+        # FEAT-002 (fixture) has no serves -- give it one, then a fresh agent
+        # task parented under it should inherit the attachment.
+        _set_fields(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md", serves=["goals.a"])
+        _write_agent_ticket(docs_root, "TASK-002_CHILD.md", parent="FEAT-002")
+        assert parser.get_orphans(docs_root) == []
+
+    def test_human_origin_never_flagged(self, docs_root):
+        # The fixture tree is entirely human-origin (no `origin` field) and
+        # unattached -- the policy never gated it, so it must never appear.
+        assert parser.get_orphans(docs_root) == []
+
+    def test_archived_ticket_excluded(self, docs_root):
+        _write_agent_ticket(docs_root, "archive/TASK-999_OLD.md")
+        assert parser.get_orphans(docs_root) == []

@@ -453,3 +453,44 @@ def get_goal_rollup(docs_root: Path) -> list[dict]:
 
     rollup.sort(key=lambda g: (not g["stamped"], g["stem"]))
     return rollup
+
+
+# -- Orphan report (FEAT-011) --
+
+def get_orphans(docs_root: Path) -> list[dict]:
+    """Agent-created tickets (``origin: agent``, FEAT-007) that attach to no
+    goal -- neither their own ``serves`` nor any ancestor's -- and aren't
+    tagged ``triage`` (the explicit escape hatch from ``llpm create
+    --triage``).
+
+    ``llpm create`` gates this at creation time, but the graph can drift
+    afterward -- an ancestor's ``serves`` edge removed via ``llpm serves
+    rm``, or a re-parent -- orphaning a ticket that was valid when it was
+    made. This is the standing report for that drift, per the FEAT-011
+    intake policy. Scoped to active tickets and to ``origin: agent`` only,
+    matching the policy's own scope (human-authored tickets were never
+    gated, so flagging them here would just be noise).
+    """
+    store = _as_store(docs_root)
+    tickets = load_all_tickets(store, include_archive=False)
+    by_id = {fm["id"].upper(): fm for _, fm, _ in tickets if fm.get("id")}
+
+    orphans = []
+    for _, fm, _ in tickets:
+        if fm.get("origin") != "agent":
+            continue
+        if "triage" in (fm.get("tags") or []):
+            continue
+        if _goal_stems_served(fm, by_id):
+            continue
+        orphans.append({
+            "id": fm.get("id"),
+            "type": fm.get("type"),
+            "title": fm.get("title"),
+            "status": fm.get("status"),
+            "parent": fm.get("parent"),
+            "created_by": fm.get("created_by"),
+        })
+
+    orphans.sort(key=lambda o: o["id"] or "")
+    return orphans
