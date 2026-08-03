@@ -41,8 +41,8 @@ class TestListJson:
         # All required fields present
         for key in (
             "id", "type", "title", "status", "effective_status", "is_blocked",
-            "priority", "effort", "parent", "children", "blockers", "serves",
-            "waits_on", "after", "tags", "requires_human", "origin",
+            "awaiting", "priority", "effort", "parent", "children", "blockers",
+            "serves", "waits_on", "after", "tags", "requires_human", "origin",
             "created_by", "commits", "managed_by", "created", "updated",
             "completed", "archived", "path",
         ):
@@ -194,6 +194,36 @@ class TestBoardJson:
     def test_excludes_complete(self, docs_root, capsys):
         data = run_json("board", "--json", docs_root=docs_root, capsys=capsys)
         assert not any(t["effective_status"] in ("complete", "closed", "draft") for t in data)
+
+
+# -- awaiting (FEAT-012) --
+
+
+class TestAwaitingJson:
+    def test_null_by_default(self, docs_root, capsys):
+        data = run_json("list", "--json", docs_root=docs_root, capsys=capsys)
+        feat = next(t for t in data if t["id"] == "FEAT-002")
+        assert feat["awaiting"] is None
+
+    def test_surfaced_in_list_json(self, docs_root, capsys):
+        run_cli("status", "FEAT-002", "review", "--awaiting", "deploy", docs_root=docs_root)
+        capsys.readouterr()
+        data = run_json("list", "--json", docs_root=docs_root, capsys=capsys)
+        feat = next(t for t in data if t["id"] == "FEAT-002")
+        assert feat["awaiting"] == "deploy"
+
+    def test_surfaced_in_board_json(self, docs_root, capsys):
+        run_cli("status", "FEAT-002", "review", "--awaiting", "human-answer", docs_root=docs_root)
+        capsys.readouterr()
+        data = run_json("board", "--json", docs_root=docs_root, capsys=capsys)
+        feat = next(t for t in data if t["id"] == "FEAT-002")
+        assert feat["awaiting"] == "human-answer"
+
+    def test_surfaced_in_show_json(self, docs_root, capsys):
+        run_cli("status", "FEAT-002", "review", "--awaiting", "push", docs_root=docs_root)
+        capsys.readouterr()
+        data = run_json("show", "FEAT-002", "--json", docs_root=docs_root, capsys=capsys)
+        assert data["awaiting"] == "push"
 
 
 # -- backlog --json --

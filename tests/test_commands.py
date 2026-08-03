@@ -217,6 +217,96 @@ class TestStatus:
             run_cli("status", "FEAT-001", "blocked", docs_root=docs_root)
 
 
+class TestAwaiting:
+    """FEAT-012: awaiting -- review-queue discriminator on 'llpm status'."""
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_set_on_review(self, mock_today, docs_root, capsys):
+        run_cli("status", "FEAT-002", "review", "--awaiting", "deploy", docs_root=docs_root)
+        fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
+        assert fm["awaiting"] == "deploy"
+
+    def test_absent_when_not_passed(self, docs_root):
+        run_cli("status", "FEAT-002", "review", docs_root=docs_root)
+        fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
+        assert "awaiting" not in fm
+
+    def test_explicit_reviewer_allowed(self, docs_root):
+        # Equivalent to absent in effect, but still an allowed explicit value.
+        run_cli("status", "FEAT-002", "review", "--awaiting", "reviewer", docs_root=docs_root)
+        fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
+        assert fm["awaiting"] == "reviewer"
+
+    def test_rejected_on_non_review_target(self, docs_root, capsys):
+        with pytest.raises(SystemExit):
+            run_cli("status", "FEAT-002", "open", "--awaiting", "deploy", docs_root=docs_root)
+        err = capsys.readouterr().err
+        assert "only valid when the target status is 'review'" in err
+
+    def test_invalid_enum_rejected(self, docs_root, capsys):
+        with pytest.raises(SystemExit):
+            run_cli("status", "FEAT-002", "review", "--awaiting", "bogus", docs_root=docs_root)
+        err = capsys.readouterr().err
+        assert "Invalid awaiting 'bogus'" in err
+        for value in ("reviewer", "push", "deploy", "human-verify", "human-answer"):
+            assert value in err
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_self_clears_on_next_transition(self, mock_today, docs_root, capsys):
+        run_cli("status", "FEAT-002", "review", "--awaiting", "deploy", docs_root=docs_root)
+        fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
+        assert fm["awaiting"] == "deploy"
+
+        run_cli("status", "FEAT-002", "complete", docs_root=docs_root)
+        fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
+        assert "awaiting" not in fm
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_reenters_review_without_awaiting_clears_it(self, mock_today, docs_root, capsys):
+        # Re-flipping into review WITHOUT --awaiting must not carry the old value forward.
+        run_cli("status", "FEAT-002", "review", "--awaiting", "deploy", docs_root=docs_root)
+        run_cli("status", "FEAT-002", "in-progress", docs_root=docs_root)
+        run_cli("status", "FEAT-002", "review", docs_root=docs_root)
+        fm, _ = parser.parse_document(docs_root / "tickets" / "FEAT-002_DOC_PARSING.md")
+        assert "awaiting" not in fm
+
+    def test_set_command_redirects(self, docs_root, capsys):
+        with pytest.raises(SystemExit):
+            run_cli("set", "FEAT-002", "awaiting=deploy", docs_root=docs_root)
+        err = capsys.readouterr().err
+        assert "llpm status" in err
+
+    def test_show_prints_awaiting_line(self, docs_root, capsys):
+        run_cli("status", "FEAT-002", "review", "--awaiting", "human-verify", docs_root=docs_root)
+        capsys.readouterr()
+        run_cli("show", "FEAT-002", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "Awaiting:  human-verify" in out
+
+    def test_show_omits_awaiting_line_when_absent(self, docs_root, capsys):
+        run_cli("show", "FEAT-002", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "Awaiting:" not in out
+
+    def test_board_chip_on_review_entry(self, docs_root, capsys):
+        run_cli("status", "FEAT-002", "review", "--awaiting", "deploy", docs_root=docs_root)
+        capsys.readouterr()
+        run_cli("board", docs_root=docs_root)
+        out = capsys.readouterr().out
+        lines = [l for l in out.splitlines() if "FEAT-002" in l]
+        assert len(lines) == 1
+        assert "[awaiting: deploy]" in lines[0]
+
+    def test_board_no_chip_without_awaiting(self, docs_root, capsys):
+        run_cli("status", "FEAT-002", "review", docs_root=docs_root)
+        capsys.readouterr()
+        run_cli("board", docs_root=docs_root)
+        out = capsys.readouterr().out
+        lines = [l for l in out.splitlines() if "FEAT-002" in l]
+        assert len(lines) == 1
+        assert "[awaiting:" not in lines[0]
+
+
 class TestBlocker:
     @patch.object(commands, "_today", return_value="2026-03-20")
     def test_add(self, mock_today, docs_root, capsys):

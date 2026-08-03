@@ -187,6 +187,22 @@ class TestVaultStatus:
         with pytest.raises(SystemExit):
             _run("status", "NOPE-999", "open", docs=docs)
 
+    def test_awaiting_round_trips_through_store_seam(self, vault_project, capsys):
+        """FEAT-012: --awaiting must work through MdTreeStore (and any store),
+        not just LocalDirStore -- it's written via the same _write_ticket
+        seam as every other frontmatter mutation."""
+        docs, fake = vault_project
+        _seed(fake, "TASK-101", "My task", status="in-progress")
+
+        _run("status", "TASK-101", "review", "--awaiting", "deploy", docs=docs)
+        fm, _ = fake.active["TASK-101_MY_TASK.md"]
+        assert fm["awaiting"] == "deploy"
+
+        # Self-clear on the next transition, same as the local-dir store.
+        _run("status", "TASK-101", "complete", docs=docs)
+        fm, _ = fake.active["TASK-101_MY_TASK.md"]
+        assert "awaiting" not in fm
+
 
 # ---------------------------------------------------------------------------
 # cmd_set

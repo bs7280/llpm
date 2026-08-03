@@ -175,7 +175,10 @@ def _build_parser():
             "to 'complete' also sets the 'completed' date. 'blocked' is not a valid choice "
             "because it is derived from unresolved blockers. Flipping to 'review' or "
             "'complete' captures provenance: commits mentioning the ticket ID in the "
-            "CWD git repo (plus any --commit SHAs) are recorded in commits[]."
+            "CWD git repo (plus any --commit SHAs) are recorded in commits[]. "
+            "--awaiting sets the review-queue discriminator (who/what unsticks "
+            "a 'review' ticket); any existing 'awaiting' is cleared on every "
+            "transition regardless."
         ),
         help="Change ticket status",
     )
@@ -191,6 +194,16 @@ def _build_parser():
             "Record a commit SHA on the ticket (repeatable). On 'review' and "
             "'complete', commits in the CWD repo mentioning the ticket ID are "
             "also captured automatically into commits[]."
+        ),
+    )
+    p_status.add_argument(
+        "--awaiting", metavar="VALUE",
+        help=(
+            "Who/what unsticks this ticket -- valid only when new_status is "
+            "'review' (reviewer|push|deploy|human-verify|human-answer). Not "
+            "a new status; absent on review means 'awaiting reviewer'. Every "
+            "status transition clears any existing 'awaiting', so it must be "
+            "re-passed on each 'status ... review' call that should carry it."
         ),
     )
 

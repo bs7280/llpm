@@ -428,6 +428,7 @@ def _ticket_to_dict(store: TicketStore, path: Path, fm: dict, body: str | None =
         "status": fm["status"],
         "effective_status": eff_status,
         "is_blocked": is_blocked,
+        "awaiting": fm.get("awaiting"),
         "priority": fm["priority"],
         "effort": fm.get("effort"),
         "model_tier": fm.get("model_tier"),
@@ -599,7 +600,14 @@ def cmd_board(args) -> None:
                 tier_chip = f" [{tier}]" if tier else ""
                 serves = fm.get("serves") or []
                 serves_chip = f"  (serves: {', '.join(serves)})" if serves else ""
-                print(f"  {indicator} {fm['id']:<16} {fm['title']}{tier_chip}{serves_chip}")
+                # FEAT-012: awaiting chip, review column only -- makes review
+                # a filterable set of queues (reviewer/Ben/CI-actionable)
+                # without splitting it into separate board columns.
+                awaiting_chip = (
+                    f"  [awaiting: {fm['awaiting']}]"
+                    if col_name == "review" and fm.get("awaiting") else ""
+                )
+                print(f"  {indicator} {fm['id']:<16} {fm['title']}{tier_chip}{serves_chip}{awaiting_chip}")
         print()
 
 
@@ -653,6 +661,8 @@ def cmd_show(args) -> None:
     print(f"Type:      {fm['type']}")
     print(f"Title:     {fm['title']}")
     print(f"Status:    {eff_status}")
+    if fm.get("awaiting"):
+        print(f"Awaiting:  {fm['awaiting']}")
     print(f"Priority:  {fm['priority']}")
 
     if "effort" in fm:
@@ -873,8 +883,35 @@ def cmd_status(args) -> None:
     old_status = fm["status"]
     new_status = args.new_status
 
+    # awaiting: — review-queue discriminator (FEAT-012). Only meaningful
+    # alongside a transition INTO review -- error loudly otherwise rather
+    # than silently accepting a flag that would have no effect.
+    awaiting = getattr(args, "awaiting", None)
+    if awaiting is not None:
+        if new_status != "review":
+            print(
+                f"Error: --awaiting is only valid when the target status is "
+                f"'review' (got '{new_status}').",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        if awaiting not in parser.VALID_AWAITING:
+            print(
+                f"Error: Invalid awaiting '{awaiting}'. Must be one of: "
+                f"{', '.join(sorted(parser.VALID_AWAITING))}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+
     fm["status"] = new_status
     fm["updated"] = _today()
+
+    # Self-clear: every transition drops any prior 'awaiting', then re-adds
+    # it only if --awaiting was passed on THIS invocation (already
+    # constrained to new_status == "review" above).
+    fm.pop("awaiting", None)
+    if awaiting is not None:
+        fm["awaiting"] = awaiting
 
     if new_status == "complete" and not fm.get("completed"):
         fm["completed"] = _today()
@@ -912,6 +949,7 @@ def cmd_set(args) -> None:
         "serves": "Use 'llpm serves'.",
         "waits_on": "Use 'llpm waits'.",
         "after": "Use 'llpm after'.",
+        "awaiting": "Use 'llpm status <id> review --awaiting <value>'.",
     }
 
     # Parse field=value pairs

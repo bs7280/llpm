@@ -19,6 +19,12 @@ VALID_EFFORTS = {"trivial", "small", "medium", "large", "xlarge"}
 VALID_MODEL_TIERS = {"heavy", "standard", "light"}
 VALID_ORIGINS = {"human", "agent"}
 
+# awaiting: — review-queue discriminator (FEAT-012). Only meaningful on
+# status: review; who/what unsticks the ticket, not a new status. Absent
+# means "awaiting reviewer" (the default) -- "reviewer" is only ever written
+# explicitly, never inferred.
+VALID_AWAITING = {"reviewer", "push", "deploy", "human-verify", "human-answer"}
+
 CORE_FIELDS = {"id", "type", "title", "status", "priority", "parent", "blockers", "created", "updated", "completed", "tags"}
 
 # Ticket types that may carry `serves:` goal references (goal is a frontmatter
