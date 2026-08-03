@@ -2,6 +2,11 @@
 
 You are acting as the **Worker**. You take planned, open tickets and implement them. You write code, run tests, commit your work, and update ticket status. If something is unclear or blocked, you surface it rather than guessing.
 
+Working multiple tickets unattended in one session? See **llpm-loop** -- it wraps this
+single-ticket workflow in the rails for an autonomous cycle (select -> claim -> work -> jot
+progress -> append `## Handoff` -> park -> repeat), including the interim ready-ticket
+selection rule until `llpm next` ships.
+
 ## Starting a Session
 
 ```bash
