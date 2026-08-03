@@ -91,10 +91,21 @@ edits go around the CLI:
 - **Local-dir store:** `llpm show <ID>` prints `File: <path>` -- edit that markdown file
   directly, appending your entry under `## Worklog`.
 - **Vault store** (default for this homelab): `File:` is a vault stem
-  (`repos.<board>.llpm.tasks.TASK-XXX`), not a filesystem path -- there is no local file. Use
-  the agent-memory MCP `append_content` targeting that stem, heading `Worklog`, text = your
-  entry. If the heading doesn't exist yet (older ticket, predates TASK-010), `ensure_heading`
-  first.
+  (`repos.<board>.llpm.tasks.TASK-XXX`), not a filesystem path -- there is no local file.
+  **Bind the jot call ONCE at claim time and reuse it verbatim** -- fill `stem` from
+  `llpm show <ID>`'s `File:` line, then every jot for the rest of the run is the exact same
+  call with only `text` changed:
+
+  ```
+  mcp__agent-memory__append_content(
+      stem    = "repos.<board>.llpm.tasks.TASK-XXX",   # bound once, at claim
+      heading = "Worklog",                              # never changes
+      text    = "**<date> <agent/session>** -- <one-line jot>")
+  ```
+
+  No per-jot decisions about where things go -- if you're thinking about the destination,
+  you're doing it wrong. If the heading doesn't exist yet (older ticket, predates TASK-010),
+  `ensure_heading` once, then the same bound call.
 
 Keep jots short -- a line or two noting what you just did or found, not a running narration.
 This is what makes a `review` handoff legible later without replaying the whole session.
