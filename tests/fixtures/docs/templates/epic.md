@@ -40,3 +40,10 @@ _External dependencies, risks, or prerequisites._
 ## Related
 
 _Links to relevant docs, discussions, or resources._
+
+## Worklog
+
+<!-- Append-only. One entry per jot, format: **<date> <agent/session>** -- <text>.
+     Jot hypotheses, dead ends, discovered constraints, workarounds, commit links -- at the
+     moment they happen, not retroactively. Never edit a prior entry. -->
+

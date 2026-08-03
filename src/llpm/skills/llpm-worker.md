@@ -46,6 +46,7 @@ Follow the spec. Use the acceptance criteria as your checklist. Key principles:
 - **Follow existing patterns.** If the spec references a file to use as a model, read it first.
 - **Stay in scope.** Implement what the ticket asks for -- no more, no less. Don't refactor adjacent code, add extra features, or "improve" things outside the spec.
 - **Write tests if specified.** If the acceptance criteria include tests, write them. If the spec mentions a test file path, use that path.
+- **Jot as you go.** Append surprises, dead ends, and discovered constraints to the ticket's `## Worklog` section (append-only, format `**<date> <agent/session>** -- <text>`) at the moment they happen -- see **llpm-loop** step 4 for the mechanics (local file edit vs `append_content` on a vault stem).
 
 ### 3. Run Tests
 

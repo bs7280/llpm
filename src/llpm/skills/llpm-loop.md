@@ -72,15 +72,29 @@ duplicate that discipline -- it only adds the loop shape around it.
 
 ### 4. Jot Progress as You Go
 
+Every ticket body carries a `## Worklog` section -- the designated home for train-of-thought
+notes you want to survive the session: hypotheses, dead ends, discovered constraints,
+workarounds, missing-capability moments ("needed an API for X, did Y instead"), commit links.
+Append-only -- never edit a prior entry -- one entry per jot, in the format:
+
+```
+**<date> <agent/session>** -- <text>
+```
+
+Jot AT THE MOMENT something happens, not retroactively when you park the ticket. A worklog
+reconstructed from memory at Handoff time is a summary; the trail is what mission control's
+liveness probe ("no jot past TTL = stuck") and a resuming agent after a dead run actually need.
+
 The CLI is a frontmatter gateway only -- it has no command to edit a ticket's body. Body
 edits go around the CLI:
 
 - **Local-dir store:** `llpm show <ID>` prints `File: <path>` -- edit that markdown file
-  directly.
+  directly, appending your entry under `## Worklog`.
 - **Vault store** (default for this homelab): `File:` is a vault stem
   (`repos.<board>.llpm.tasks.TASK-XXX`), not a filesystem path -- there is no local file. Use
-  the agent-memory MCP (`append_content`, targeting that stem and a body heading) to add
-  notes.
+  the agent-memory MCP `append_content` targeting that stem, heading `Worklog`, text = your
+  entry. If the heading doesn't exist yet (older ticket, predates TASK-010), `ensure_heading`
+  first.
 
 Keep jots short -- a line or two noting what you just did or found, not a running narration.
 This is what makes a `review` handoff legible later without replaying the whole session.
@@ -160,7 +174,7 @@ Stop the loop when:
 1. llpm list --status open --json        # select (manual until FEAT-009 ships llpm next)
 2. llpm status TASK-XXX in-progress      # claim
 3. [implement per llpm-worker]           # work
-4. [edit body / append_content]          # jot progress as you go
+4. [append_content -> ## Worklog]        # jot progress as you go, at the moment it happens
 5. [append ## Handoff to the ticket]     # outcome/shipped/surprises/questions/follow-ups
 6. llpm status TASK-XXX review [--awaiting VALUE]   # park
 7. repeat from 1, until queue is dry or you are blocked

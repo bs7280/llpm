@@ -191,6 +191,18 @@ class TestCreate:
         with pytest.raises(SystemExit):
             run_cli("create", "nonexistent", "Won't work", docs_root=docs_root)
 
+    @patch.object(commands, "_today", return_value="2026-08-02")
+    def test_create_all_types_include_worklog(self, mock_today, docs_root, capsys):
+        """Every bundled ticket type gets a ## Worklog section in the body (TASK-010)."""
+        for ttype in ("task", "feature", "epic", "research"):
+            run_cli("create", ttype, f"Worklog check {ttype}", docs_root=docs_root)
+            out = capsys.readouterr().out
+            ticket_id = out.split("Created ", 1)[1].split(":", 1)[0].strip()
+            path = parser.find_ticket_by_id(docs_root, ticket_id)
+            assert path is not None, f"could not find newly created {ttype} ticket {ticket_id}"
+            _, body = parser.parse_document(path)
+            assert "## Worklog" in body, f"{ttype} body missing ## Worklog"
+
 
 class TestStatus:
     @patch.object(commands, "_today", return_value="2026-03-20")
@@ -1235,6 +1247,20 @@ class TestModelTierDisplay:
         for tmpl_name in ("task.md", "feature.md", "epic.md", "research.md"):
             content = (templates_dir / tmpl_name).read_text(encoding="utf-8")
             assert "model_tier:" in content, f"{tmpl_name} missing model_tier field"
+
+    def test_templates_include_worklog(self):
+        """All four bundled templates carry a ## Worklog section with a format hint (TASK-010)."""
+        from llpm.commands import _templates_source
+        from pathlib import Path
+
+        templates_dir = Path(str(_templates_source()))
+        for tmpl_name in ("task.md", "feature.md", "epic.md", "research.md"):
+            content = (templates_dir / tmpl_name).read_text(encoding="utf-8")
+            assert "## Worklog" in content, f"{tmpl_name} missing ## Worklog section"
+            assert content.rstrip().endswith("-->"), f"{tmpl_name} Worklog section should be last"
+            # Format-hint comment: entry format + append-only rule
+            assert "<agent/session>" in content, f"{tmpl_name} Worklog missing entry-format hint"
+            assert "Append-only" in content, f"{tmpl_name} Worklog missing append-only hint"
 
 
 # ---------------------------------------------------------------------------

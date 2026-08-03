@@ -29,3 +29,10 @@ _What needs to be done?_
 ## Notes
 
 _Any additional context or implementation notes._
+
+## Worklog
+
+<!-- Append-only. One entry per jot, format: **<date> <agent/session>** -- <text>.
+     Jot hypotheses, dead ends, discovered constraints, workarounds, commit links -- at the
+     moment they happen, not retroactively. Never edit a prior entry. -->
+

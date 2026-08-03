@@ -1021,6 +1021,17 @@ class TestVaultCreateBundledFallback:
         capsys.readouterr()  # drain
         assert len(fake.active) == 4
 
+    def test_create_all_bundled_types_include_worklog(self, vault_project, capsys):
+        """Vault-store creates also get ## Worklog from the bundled fallback (TASK-010)."""
+        docs, fake = vault_project
+        with patch.object(commands, "_today", return_value="2026-07-05"):
+            for t in ("task", "feature", "epic", "research"):
+                _run("create", t, f"Worklog check {t}", docs=docs)
+        capsys.readouterr()  # drain
+
+        for filename, (_, body) in fake.active.items():
+            assert "## Worklog" in body, f"{filename} body missing ## Worklog"
+
 
 # ---------------------------------------------------------------------------
 # cmd_init — vault-aware (scope 2)
