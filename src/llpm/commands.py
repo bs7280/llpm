@@ -127,18 +127,38 @@ def _find_repo_config() -> dict | None:
 def _resolve_store_config(args) -> dict:
     """Resolve the full store configuration.
 
-    Resolution order:
+    Resolution order for the *store location* (kind + docs_root/etc.):
     1. --docs-root flag  (forces kind=dir)
     2. LLPM_DOCS_ROOT env var  (forces kind=dir)
     3. In-repo .llpm/config.toml (walk upward from CWD)
     4. Default: ./llpm dir, kind=dir (no error — _require_initialized handles it)
-    """
-    if hasattr(args, "docs_root") and args.docs_root:
-        return {"kind": "dir", "docs_root": Path(args.docs_root).resolve()}
 
-    env = os.environ.get("LLPM_DOCS_ROOT")
-    if env:
-        return {"kind": "dir", "docs_root": Path(env).resolve()}
+    ``[intake]`` policy is resolved separately from store location: branches 1
+    and 2 override *where the store lives*, not which board's policy applies,
+    so they still consult the discovered .llpm/config.toml (if any) for
+    ``"intake"``. This matters for the task fabric, where LLPM_DOCS_ROOT is
+    the box-spawn env contract — board policy (`require_goal`, `auto_approve`)
+    must not silently vanish just because the store location came from the
+    env var instead of config discovery.
+
+    A malformed/unknown-kind config found during that lookup still raises
+    SystemExit (via `_find_repo_config`), even though its `[store]` table is
+    about to be ignored in favor of the override — a broken config.toml
+    should fail loudly, not be silently ignored just because this particular
+    command happened to bypass its store section.
+    """
+    override_root: Path | None = None
+    if hasattr(args, "docs_root") and args.docs_root:
+        override_root = Path(args.docs_root).resolve()
+    else:
+        env = os.environ.get("LLPM_DOCS_ROOT")
+        if env:
+            override_root = Path(env).resolve()
+
+    if override_root is not None:
+        repo_config = _find_repo_config()
+        intake = repo_config["intake"] if repo_config is not None else {}
+        return {"kind": "dir", "docs_root": override_root, "intake": intake}
 
     repo_config = _find_repo_config()
     if repo_config is not None:

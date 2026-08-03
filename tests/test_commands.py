@@ -1371,3 +1371,92 @@ class TestRequireGoalConfig:
             main(["orphans"])
         err = capsys.readouterr().err
         assert "Invalid [intake] require_goal 'block'" in err
+
+
+class TestIntakeConfigWithStoreOverride:
+    """Regression for the FEAT-011 review defect: --docs-root / LLPM_DOCS_ROOT
+    override *store location* only. [intake] policy must still come from the
+    discovered .llpm/config.toml even when an override wins branch 1/2 of
+    _resolve_store_config -- before the fix, those branches returned early
+    without ever calling _find_repo_config(), so require_goal/auto_approve
+    silently reset to defaults whenever the store came from the flag or env
+    var. LLPM_DOCS_ROOT is the box-spawn env contract in the task fabric, so
+    this is exactly the path board policy must survive.
+
+    Each project's own [store] root ("./configured_store") deliberately
+    differs from the override target ("./override_store") -- a plain dir
+    store has no config.toml of its own, so a pass here can only mean intake
+    came from the discovered config, not from something at the override path.
+    """
+
+    def _write_config(self, tmp_path, monkeypatch, intake_toml):
+        monkeypatch.chdir(tmp_path)
+        config_dir = tmp_path / ".llpm"
+        config_dir.mkdir()
+        (config_dir / "config.toml").write_text(
+            f'[store]\nkind = "dir"\nroot = "./configured_store"\n\n'
+            f"[intake]\n{intake_toml}"
+        )
+        return tmp_path / "override_store"
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_docs_root_flag_still_honors_require_goal(self, mock_today, tmp_path, monkeypatch, capsys):
+        override_root = self._write_config(tmp_path, monkeypatch, 'require_goal = "enforce"\n')
+        main(["--docs-root", str(override_root), "init"])
+        main(["--docs-root", str(override_root), "create", "task", "Orphan",
+              "--origin", "agent", "--created-by", "s-1"])
+        capsys.readouterr()
+
+        main(["--docs-root", str(override_root), "orphans"])
+        out = capsys.readouterr().out
+        assert "NOT dispatch-eligible" in out  # enforce label, not the default "warn"
+
+        # The override really won for store location (ticket lives under
+        # override_store, config's own configured_store was never created).
+        assert (override_root / "tickets").exists()
+        assert not (tmp_path / "configured_store").exists()
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_env_var_still_honors_require_goal(self, mock_today, tmp_path, monkeypatch, capsys):
+        override_root = self._write_config(tmp_path, monkeypatch, 'require_goal = "enforce"\n')
+        monkeypatch.setenv("LLPM_DOCS_ROOT", str(override_root))
+        main(["init"])
+        main(["create", "task", "Orphan", "--origin", "agent", "--created-by", "s-1"])
+        capsys.readouterr()
+
+        main(["orphans"])
+        out = capsys.readouterr().out
+        assert "NOT dispatch-eligible" in out
+
+        assert (override_root / "tickets").exists()
+        assert not (tmp_path / "configured_store").exists()
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_docs_root_flag_still_honors_auto_approve(self, mock_today, tmp_path, monkeypatch, capsys):
+        override_root = self._write_config(tmp_path, monkeypatch, 'auto_approve = ["task"]\n')
+        main(["--docs-root", str(override_root), "init"])
+        main(["--docs-root", str(override_root), "create", "task", "Pre-vetted",
+              "--origin", "agent", "--created-by", "s-1", "--body", "some body text"])
+        fm, _ = parser.parse_document(parser.find_ticket_by_id(override_root, "TASK-001"))
+        assert fm["status"] == "open"  # auto_approve honored despite store override
+
+    def test_override_without_any_config_file_is_unchanged(self, tmp_path, monkeypatch, capsys):
+        """No .llpm/config.toml anywhere above CWD -- override branches must
+        keep behaving exactly as before the fix: intake resolves to {}."""
+        import types
+
+        empty_cwd = tmp_path / "no_config_here"
+        empty_cwd.mkdir()
+        monkeypatch.chdir(empty_cwd)
+        override_root = tmp_path / "override_store"
+
+        args = types.SimpleNamespace(docs_root=str(override_root))
+        cfg = commands._resolve_store_config(args)
+        assert cfg["kind"] == "dir"
+        assert cfg["docs_root"] == override_root.resolve()
+        assert cfg.get("intake") == {}
+
+        main(["--docs-root", str(override_root), "init"])
+        main(["--docs-root", str(override_root), "orphans"])
+        out = capsys.readouterr().out
+        assert "No orphaned agent-created tickets." in out  # default warn mode, nothing to report yet
