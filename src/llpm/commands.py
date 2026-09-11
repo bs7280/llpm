@@ -406,6 +406,27 @@ def _require_ticket(store: TicketStore, ticket_id: str) -> tuple[Path, dict, str
     return result
 
 
+# Plan-structure fields (contract: vault stem
+# repos.coaching_platfrom_saas.llpm.milestones) are free-form frontmatter, so
+# the JSON shape normalizes them the way the marginalia board does: `resource`
+# is stored comma-separated (set only splits tags) and `hours` may predate
+# numeric coercion in `set`.
+def _split_keys(value) -> list[str]:
+    if value is None:
+        return []
+    parts = value if isinstance(value, list) else str(value).split(",")
+    return [s for s in (str(p).strip() for p in parts) if s]
+
+
+def _as_hours(value) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _ticket_to_dict(store: TicketStore, path: Path, fm: dict, body: str | None = None) -> dict:
     """Serialize a ticket to the JSON output schema.
 
@@ -443,6 +464,10 @@ def _ticket_to_dict(store: TicketStore, path: Path, fm: dict, body: str | None =
         "after": fm.get("after") or [],
         "tags": fm.get("tags") or [],
         "requires_human": fm.get("requires_human", False),
+        "milestone": fm.get("milestone"),
+        "batch": fm.get("batch"),
+        "resource": _split_keys(fm.get("resource")),
+        "hours": _as_hours(fm.get("hours")),
         "origin": fm.get("origin"),
         "created_by": fm.get("created_by"),
         "commits": fm.get("commits") or [],
@@ -935,6 +960,25 @@ def cmd_status(args) -> None:
         print(f"Captured {captured} commit(s) -> commits[]")
 
 
+# `set` values arrive as strings. Numeric-looking ones become numbers (so
+# `hours=9` stays numeric across CLI edits) except in known text fields —
+# and a leading zero ("007") is text, not a number.
+_TEXT_FIELDS = {"title", "parent", "branch", "origin_request", "milestone",
+                "batch", "resource"}
+_INT_RE = re.compile(r"^-?(?:0|[1-9]\d*)$")
+_FLOAT_RE = re.compile(r"^-?(?:0|[1-9]\d*)\.\d+$")
+
+
+def _coerce_number(field: str, value):
+    if not isinstance(value, str) or field in _TEXT_FIELDS:
+        return value
+    if _INT_RE.match(value):
+        return int(value)
+    if _FLOAT_RE.match(value):
+        return float(value)
+    return value
+
+
 def cmd_set(args) -> None:
     store, docs_root = _resolve_store_and_root(args)
 
@@ -1006,6 +1050,8 @@ def cmd_set(args) -> None:
         # Handle requires_human
         if field == "requires_human":
             value = value.lower() in ("true", "yes", "1")
+
+        value = _coerce_number(field, value)
 
         # Validate parent exists
         if field == "parent" and value is not None:

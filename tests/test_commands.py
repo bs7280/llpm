@@ -436,6 +436,61 @@ class TestSet:
         assert fm["title"] == "New Title"
 
 
+class TestPlanFields:
+    """TASK-011: plan-structure fields round-trip (marginalia board contract)."""
+
+    FEAT2 = ("tickets", "FEAT-002_DOC_PARSING.md")
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_set_coerces_numbers(self, mock_today, docs_root, capsys):
+        run_cli("set", "FEAT-002", "hours=9", "estimate=10.25", "delta=-2",
+                docs_root=docs_root)
+        fm, _ = parser.parse_document(docs_root.joinpath(*self.FEAT2))
+        assert fm["hours"] == 9 and isinstance(fm["hours"], int)
+        assert fm["estimate"] == 10.25
+        assert fm["delta"] == -2
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_set_keeps_text_fields_and_leading_zeros_as_strings(
+        self, mock_today, docs_root, capsys
+    ):
+        run_cli("set", "FEAT-002", "title=2026", "code=007", "milestone=1",
+                "resource=migrations,e2e-browser", "version=1.2.3",
+                docs_root=docs_root)
+        fm, _ = parser.parse_document(docs_root.joinpath(*self.FEAT2))
+        assert fm["title"] == "2026"
+        assert fm["code"] == "007"
+        assert fm["milestone"] == "1"
+        assert fm["resource"] == "migrations,e2e-browser"  # contract: a string
+        assert fm["version"] == "1.2.3"
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_json_carries_plan_fields_like_the_board(self, mock_today, docs_root, capsys):
+        import json as _json
+        run_cli("set", "FEAT-002", "milestone=M1-signup", "batch=auth",
+                "resource=migrations, e2e-browser", "hours=2.5", docs_root=docs_root)
+        capsys.readouterr()
+        run_cli("show", "FEAT-002", "--json", docs_root=docs_root)
+        data = _json.loads(capsys.readouterr().out)
+        assert data["milestone"] == "M1-signup"
+        assert data["batch"] == "auth"
+        assert data["resource"] == ["migrations", "e2e-browser"]
+        assert data["hours"] == 2.5
+        assert data["after"] == [] and data["requires_human"] is False
+
+    def test_json_plan_fields_default_empty(self, docs_root, capsys):
+        import json as _json
+        run_cli("list", "--json", docs_root=docs_root)
+        row = _json.loads(capsys.readouterr().out)[0]
+        assert (row["milestone"], row["batch"], row["resource"], row["hours"]) == (
+            None, None, [], None)
+
+    def test_json_hours_parses_legacy_strings(self):
+        assert commands._as_hours("10.25") == 10.25
+        assert commands._as_hours("junk") is None
+        assert commands._as_hours(True) is None
+
+
 class TestProvenanceCreate:
     """FEAT-007: origin/created_by/managed_by/commits injected at create."""
 
