@@ -341,7 +341,8 @@ def _build_parser():
         description=(
             "Delete a ticket file. Warns about and cleans up relationships: removes the "
             "ticket from other tickets' blocker lists and orphans children (sets their "
-            "parent to null). Primarily for correcting mistakes."
+            "parent to null). Notes below the ticket (agent-workers etc.) are deleted with "
+            "it. Primarily for correcting mistakes."
         ),
         help="Delete a ticket (with relationship cleanup)",
     )

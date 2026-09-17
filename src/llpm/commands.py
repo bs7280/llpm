@@ -1430,6 +1430,11 @@ def cmd_archive(args) -> None:
         print(f"Archived {fm['id']} -> tickets/archive/{path.name}")
 
 
+# Notes below a ticket are meant to be spammed (dozens per worker is normal);
+# the delete prompt names a few and counts the rest.
+_SUBNOTE_PREVIEW = 5
+
+
 def cmd_delete(args) -> None:
     store, docs_root = _resolve_store_and_root(args)
 
@@ -1468,6 +1473,15 @@ def cmd_delete(args) -> None:
             print(f"  - Remove {ticket_id} from {ref_id}'s {ref_field}")
         for child_id in children_of:
             print(f"  - Orphan {child_id} (parent will become null)")
+        print()
+
+    subnotes = parser.get_subnotes(store, path)
+    if subnotes:
+        print(f"Deleting will also remove {len(subnotes)} note(s) below this ticket:")
+        for name in subnotes[:_SUBNOTE_PREVIEW]:
+            print(f"  - {name}")
+        if len(subnotes) > _SUBNOTE_PREVIEW:
+            print(f"  ... and {len(subnotes) - _SUBNOTE_PREVIEW} more")
         print()
 
     if not auto_yes:

@@ -205,6 +205,15 @@ def load_all_tickets(docs_root: Path, include_archive: bool = True) -> list[tupl
     return results
 
 
+def get_subnotes(docs_root: Path, ref: Path) -> list[str]:
+    """Notes hanging below a ticket (``<ID>.agent-workers.…``, and any other
+    child kind). Degrades to ``[]`` for a store predating the ``subnotes`` protocol method."""
+    fn = getattr(_as_store(docs_root), "subnotes", None)
+    if fn is None:
+        return []
+    return fn(ref)
+
+
 # -- ID Generation --
 
 def next_id(docs_root: Path, ticket_type: str) -> str:

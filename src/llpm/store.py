@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import ssl
 import urllib.error
 import urllib.parse
@@ -69,11 +70,21 @@ class TicketStore(Protocol):
         ...
 
     def archive(self, ref: Path) -> Path:
-        """Move the ticket at ref into the archive. Returns the new ref."""
+        """Move the ticket at ref -- and every note below it -- into the
+        archive. Returns the new ref."""
         ...
 
     def delete(self, ref: Path) -> None:
-        """Remove the ticket at ref."""
+        """Remove the ticket at ref and every note below it."""
+        ...
+
+    def subnotes(self, ref: Path) -> list[str]:
+        """Names of the notes hanging *below* the ticket at ref -- the natural
+        home for whatever accumulates around a ticket, one child segment per
+        kind (``<ID>.agent-workers.<worker>…``, ``<ID>.human-review…``). These
+        are never tickets, whatever their frontmatter says: ``list_tickets``
+        skips them, ``archive`` carries them along, ``delete`` removes them.
+        Returns ``[]`` when there are none."""
         ...
 
     def read_blob(self, name: str) -> str | None:
@@ -118,6 +129,13 @@ class LocalDirStore:
     and commands.py -- including the O_CREAT|O_EXCL atomic create.
     """
 
+    # ``<ID>.<anything>.md`` is a note *below* ticket ``<ID>`` -- the dotted-
+    # filename spelling of a vault child stem (``TASK-001.agent-workers.w1.md``).
+    # Ticket files are ``<ID>_SLUG.md`` and slugs never contain dots, so an ID
+    # followed by a dot is unambiguous.
+    _SUBNOTE_RE = re.compile(r"^[A-Za-z]+-\d+\.(?!md$)")
+    _TICKET_ID_RE = re.compile(r"^[A-Za-z]+-\d+")
+
     def __init__(self, docs_root: Path) -> None:
         self.docs_root = docs_root
         self.tickets_dir = docs_root / "tickets"
@@ -131,7 +149,7 @@ class LocalDirStore:
         if include_archive and self.archive_dir.exists():
             results.extend(self.archive_dir.glob("*.md"))
 
-        return sorted(results)
+        return sorted(p for p in results if not self._SUBNOTE_RE.match(p.name))
 
     def read(self, ticket_id: str) -> tuple[Path, dict, str] | None:
         ref = self._find(ticket_id)
@@ -155,12 +173,27 @@ class LocalDirStore:
 
     def archive(self, ref: Path) -> Path:
         self.archive_dir.mkdir(exist_ok=True)
+        for sub in self._subnote_paths(ref):
+            sub.rename(self.archive_dir / sub.name)
         dst = self.archive_dir / ref.name
         ref.rename(dst)
         return dst
 
     def delete(self, ref: Path) -> None:
+        for sub in self._subnote_paths(ref):
+            sub.unlink()
         ref.unlink()
+
+    def subnotes(self, ref: Path) -> list[str]:
+        return [p.name for p in self._subnote_paths(ref)]
+
+    def _subnote_paths(self, ref: Path) -> list[Path]:
+        """Sibling files ``<ID>.<…>.md`` of the ticket at ref."""
+        m = self._TICKET_ID_RE.match(ref.name)
+        if m is None:
+            return []
+        # The trailing dot ends the ID, so TASK-001 never claims TASK-0010's.
+        return sorted(ref.parent.glob(f"{m.group(0)}.*.md"))
 
     def read_blob(self, name: str) -> str | None:
         path = self.docs_root / name
@@ -266,6 +299,13 @@ class MdTreeStore:
         repos.<repo_stem>.llpm.archive.TASK-001   (archived)
         repos.<repo_stem>.llpm.todo                (TODO blob)
         repos.<repo_stem>.llpm.templates.<type>    (template blobs)
+
+    A ticket is exactly one segment below its bucket. Anything deeper --
+    ``…tasks.TASK-001.agent-workers.<worker>[.<child>…]`` (the notes a
+    dispatched worker spams), ``…TASK-001.human-review…``, whatever kind comes
+    next -- belongs to that ticket and is never a ticket itself (see
+    ``subnotes``). The rule is structural on purpose: ``agent-workers`` is one
+    child kind among several, and llpm special-cases none of them.
 
     Errors are loud: connection failures propagate; 404 on a stem returns None
     from ``read()``; 409 on ``create_exclusive`` raises ``FileExistsError``.
@@ -421,15 +461,35 @@ class MdTreeStore:
         with self._open(req):
             pass
 
+    # The service's page-size ceiling (its default is 100). A bucket listing
+    # also returns every note *below* each ticket, so one default-sized page
+    # silently drops real tickets -- and next_id then mints an ID that exists.
+    _LIST_PAGE_SIZE = 1000
+
     def _list_pattern(self, pattern: str) -> list[dict]:
-        """List notes matching a glob pattern. Returns list of {stem, title} dicts."""
-        url = (
-            self._base
-            + "/api/v1/notes?pattern="
-            + urllib.parse.quote(pattern, safe="")
-        )
-        data = self._get_json(url)
-        return data.get("items", [])
+        """List every note matching a glob pattern, following ``total`` /
+        ``offset`` until exhausted. Returns list of {stem, title} dicts."""
+        items: list[dict] = []
+        seen: set[str] = set()
+        offset = 0
+        while True:
+            url = (
+                self._base
+                + "/api/v1/notes?pattern="
+                + urllib.parse.quote(pattern, safe="")
+                + f"&limit={self._LIST_PAGE_SIZE}&offset={offset}"
+            )
+            data = self._get_json(url)
+            page = data.get("items", [])
+            for item in page:
+                # A note created between two page fetches shifts the listing
+                # and can repeat an item across the page boundary.
+                if item["stem"] not in seen:
+                    seen.add(item["stem"])
+                    items.append(item)
+            offset += len(page)
+            if not page or offset >= data.get("total", 0):
+                return items
 
     # -- Parsing helpers ------------------------------------------------------
 
@@ -462,18 +522,27 @@ class MdTreeStore:
 
     # -- TicketStore protocol -------------------------------------------------
 
+    def _is_ticket_stem(self, stem: str) -> bool:
+        """True for ``<ns>.<bucket>.<ID>`` exactly. The service's fnmatch ``*``
+        crosses dots, so ``<ns>.tasks.*`` also returns everything below each
+        ticket; those notes are the ticket's subnotes, not tickets."""
+        prefix = self._ns + "."
+        return stem.startswith(prefix) and stem[len(prefix):].count(".") == 1
+
     def list_tickets(self, include_archive: bool = True) -> list[VaultRef]:
         refs: list[VaultRef] = []
 
         for sub_stem in _TYPE_STEMS.values():
             pattern = f"{self._ns}.{sub_stem}.*"
             for item in self._list_pattern(pattern):
-                refs.append(VaultRef(vault_stem=item["stem"], is_archived=False))
+                if self._is_ticket_stem(item["stem"]):
+                    refs.append(VaultRef(vault_stem=item["stem"], is_archived=False))
 
         if include_archive:
             pattern = f"{self._ns}.archive.*"
             for item in self._list_pattern(pattern):
-                refs.append(VaultRef(vault_stem=item["stem"], is_archived=True))
+                if self._is_ticket_stem(item["stem"]):
+                    refs.append(VaultRef(vault_stem=item["stem"], is_archived=True))
 
         return sorted(refs, key=lambda r: r.vault_stem)
 
@@ -525,11 +594,25 @@ class MdTreeStore:
     def archive(self, ref: VaultRef) -> VaultRef:
         ticket_id = ref.name
         new_stem = self._archive_stem(ticket_id)
+        # The service's move is subtree-wide: subnotes ride along.
         self._move(ref.vault_stem, new_stem)
         return VaultRef(vault_stem=new_stem, is_archived=True)
 
     def delete(self, ref: VaultRef) -> None:
+        # Unlike move, the service's DELETE removes one note. Clear what hangs
+        # below the ticket first, deepest first and the ticket last, so an
+        # interrupted delete leaves a ticket with fewer subnotes -- never
+        # subnotes under a ticket that no longer exists.
+        for stem in sorted(self.subnotes(ref), key=lambda s: s.count("."), reverse=True):
+            try:
+                self._delete(stem)
+            except urllib.error.HTTPError as e:
+                if e.code != 404:  # already gone (a concurrent cleanup) is fine
+                    raise
         self._delete(ref.vault_stem)
+
+    def subnotes(self, ref: VaultRef) -> list[str]:
+        return sorted(i["stem"] for i in self._list_pattern(ref.vault_stem + ".*"))
 
     def read_blob(self, name: str) -> str | None:
         """Read a named blob from the vault.

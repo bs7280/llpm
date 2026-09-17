@@ -39,6 +39,7 @@ class FakeStore:
         self.foreign = {}   # vault stem -> frontmatter (cross-board notes)
         self.foreign_reachable = True
         self.goal_notes = {}  # vault stem -> frontmatter (type: goal notes)
+        self.subnote_names = {}  # ticket filename -> names of notes below it
 
     def list_tickets(self, include_archive=True):
         refs = [PurePosixPath(name) for name in self.active]
@@ -74,6 +75,9 @@ class FakeStore:
 
     def delete(self, ref):
         del self._bucket(ref)[ref.name]
+
+    def subnotes(self, ref):
+        return list(self.subnote_names.get(ref.name, []))
 
     def read_blob(self, name):
         return self.blobs.get(name)
@@ -395,7 +399,25 @@ class TestVaultDelete:
 
         out = capsys.readouterr().out
         assert "Deleted TASK-101" in out
+        assert "below this ticket" not in out
         assert fake.read("TASK-101") is None
+
+    def test_delete_announces_subnotes(self, vault_project, capsys):
+        # Agent run notes below a ticket go with it; the prompt says so,
+        # previewing a few and counting the rest.
+        docs, fake = vault_project
+        _seed(fake, "TASK-101", "Delete me")
+        fake.subnote_names["TASK-101_DELETE_ME.md"] = [
+            f"repos.x.llpm.tasks.TASK-101.agent-workers.w{i}" for i in range(7)
+        ]
+
+        _run("delete", "TASK-101", "--yes", docs=docs)
+
+        out = capsys.readouterr().out
+        assert "also remove 7 note(s) below this ticket" in out
+        assert "TASK-101.agent-workers.w0" in out
+        assert "... and 2 more" in out
+        assert "Deleted TASK-101" in out
 
     def test_delete_cleans_up_blockers(self, vault_project, capsys):
         docs, fake = vault_project

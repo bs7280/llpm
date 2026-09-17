@@ -260,6 +260,179 @@ class TestMdTreeStoreList:
         assert not any("archive" in c for c in calls)
 
 
+# ---------------------------------------------------------------------------
+# Notes below a ticket (FEAT-014) -- agent run notes are never tickets
+# ---------------------------------------------------------------------------
+
+def _url_of(req_or_url) -> str:
+    return req_or_url if isinstance(req_or_url, str) else req_or_url.full_url
+
+
+def _query(req_or_url) -> dict:
+    qs = urllib.parse.parse_qs(urllib.parse.urlparse(_url_of(req_or_url)).query)
+    return {k: v[0] for k, v in qs.items()}
+
+
+def _serve_listing(stems_by_pattern: dict[str, list[str]]):
+    """urlopen side_effect: a paginating /notes endpoint over fixed stems,
+    honoring limit/offset the way the real service does."""
+    def side_effect(req_or_url, *a, **kw):
+        q = _query(req_or_url)
+        stems = stems_by_pattern.get(q["pattern"], [])
+        limit, offset = int(q.get("limit", 100)), int(q.get("offset", 0))
+        page = [{"stem": s, "title": None} for s in stems[offset:offset + limit]]
+        return _response({"items": page, "total": len(stems), "limit": limit, "offset": offset})
+    return side_effect
+
+
+class TestMdTreeStoreSubnotes:
+    def test_list_ignores_notes_below_a_ticket(self, store):
+        # The service's fnmatch `*` crosses dots, so the bucket glob returns
+        # the ticket's whole subtree -- whatever the segment is called.
+        listing = _serve_listing({
+            "repos.myrepo.llpm.tasks.*": [
+                "repos.myrepo.llpm.tasks.TASK-001",
+                "repos.myrepo.llpm.tasks.TASK-001.agent-workers.sonnet-a3f9",
+                "repos.myrepo.llpm.tasks.TASK-001.agent-workers.sonnet-a3f9.test-report",
+                "repos.myrepo.llpm.tasks.TASK-001.runs.task-001-3fa4b2c1",
+                "repos.myrepo.llpm.tasks.TASK-002",
+            ],
+            "repos.myrepo.llpm.archive.*": [
+                "repos.myrepo.llpm.archive.TASK-000",
+                "repos.myrepo.llpm.archive.TASK-000.agent-workers.w1",
+            ],
+        })
+        with patch("urllib.request.urlopen", side_effect=listing):
+            refs = store.list_tickets(include_archive=True)
+
+        assert [r.vault_stem for r in refs] == [
+            "repos.myrepo.llpm.archive.TASK-000",
+            "repos.myrepo.llpm.tasks.TASK-001",
+            "repos.myrepo.llpm.tasks.TASK-002",
+        ]
+
+    def test_dotted_repo_stem(self):
+        # The one-segment rule is relative to the namespace, not an absolute
+        # segment count.
+        store = MdTreeStore("https://agent-memory.home.lab", "org.repo")
+        assert store._is_ticket_stem("repos.org.repo.llpm.tasks.TASK-001")
+        assert not store._is_ticket_stem("repos.org.repo.llpm.tasks.TASK-001.agent-workers.w1")
+        assert not store._is_ticket_stem("repos.other.llpm.tasks.TASK-001")
+
+    def test_listing_asks_for_the_max_page(self, store):
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.return_value = _response({"items": [], "total": 0})
+            store.list_tickets(include_archive=False)
+        assert all(_query(c.args[0])["limit"] == "1000" for c in mock_open.call_args_list)
+
+    def test_listing_follows_pagination(self, store):
+        store._LIST_PAGE_SIZE = 2
+        stems = [f"repos.myrepo.llpm.features.FEAT-{n:03d}" for n in range(1, 6)]
+        listing = _serve_listing({"repos.myrepo.llpm.features.*": stems})
+        with patch("urllib.request.urlopen", side_effect=listing) as mock_open:
+            refs = store.list_tickets(include_archive=False)
+
+        assert [r.name for r in refs] == [f"FEAT-{n:03d}" for n in range(1, 6)]
+        feature_calls = [c for c in mock_open.call_args_list if "features" in _url_of(c.args[0])]
+        assert [_query(c.args[0])["offset"] for c in feature_calls] == ["0", "2", "4"]
+
+    def test_next_id_sees_tickets_past_the_first_page(self, store):
+        # The failure this guards: worker notes fill the page, the highest
+        # real ticket falls off the end, and next_id mints an ID that exists.
+        from llpm import parser
+
+        store._LIST_PAGE_SIZE = 3
+        stems = [f"repos.myrepo.llpm.features.FEAT-001.agent-workers.w{i}" for i in range(5)]
+        stems += ["repos.myrepo.llpm.features.FEAT-001", "repos.myrepo.llpm.features.FEAT-076"]
+        listing = _serve_listing({"repos.myrepo.llpm.features.*": sorted(stems)})
+        with patch("urllib.request.urlopen", side_effect=listing):
+            assert parser.next_id(store, "feature") == "FEAT-077"
+
+    def test_listing_dedupes_across_a_shifting_page_boundary(self, store):
+        # A note created between two fetches repeats the boundary item.
+        store._LIST_PAGE_SIZE = 2
+        pages = {
+            0: ["repos.myrepo.llpm.tasks.TASK-001", "repos.myrepo.llpm.tasks.TASK-002"],
+            2: ["repos.myrepo.llpm.tasks.TASK-002", "repos.myrepo.llpm.tasks.TASK-003"],
+        }
+
+        def side_effect(req_or_url, *a, **kw):
+            q = _query(req_or_url)
+            if "tasks" not in q["pattern"]:
+                return _response({"items": [], "total": 0})
+            items = [{"stem": s} for s in pages[int(q["offset"])]]
+            return _response({"items": items, "total": 4})
+
+        with patch("urllib.request.urlopen", side_effect=side_effect):
+            refs = store.list_tickets(include_archive=False)
+        assert [r.name for r in refs] == ["TASK-001", "TASK-002", "TASK-003"]
+
+    def test_subnotes(self, store):
+        ref = VaultRef("repos.myrepo.llpm.tasks.TASK-001")
+        listing = _serve_listing({
+            "repos.myrepo.llpm.tasks.TASK-001.*": [
+                "repos.myrepo.llpm.tasks.TASK-001.agent-workers.w1.screenshots",
+                "repos.myrepo.llpm.tasks.TASK-001.agent-workers.w1",
+            ],
+        })
+        with patch("urllib.request.urlopen", side_effect=listing):
+            assert store.subnotes(ref) == [
+                "repos.myrepo.llpm.tasks.TASK-001.agent-workers.w1",
+                "repos.myrepo.llpm.tasks.TASK-001.agent-workers.w1.screenshots",
+            ]
+
+    def _delete_recorder(self, subnotes, fail=None):
+        """side_effect serving the subnote listing and recording DELETEs."""
+        deleted = []
+        listing = _serve_listing({"repos.myrepo.llpm.tasks.TASK-001.*": subnotes})
+
+        def side_effect(req_or_url, *a, **kw):
+            if isinstance(req_or_url, str) or req_or_url.get_method() != "DELETE":
+                return listing(req_or_url)
+            stem = urllib.parse.unquote(req_or_url.full_url.rsplit("/", 1)[-1])
+            if fail and stem in fail:
+                raise _http_error(fail[stem])
+            deleted.append(stem)
+            return _response({"stem": stem, "dangling": []})
+
+        return side_effect, deleted
+
+    def test_delete_removes_subtree_deepest_first_ticket_last(self, store):
+        ref = VaultRef("repos.myrepo.llpm.tasks.TASK-001")
+        side_effect, deleted = self._delete_recorder([
+            "repos.myrepo.llpm.tasks.TASK-001.agent-workers.w1",
+            "repos.myrepo.llpm.tasks.TASK-001.agent-workers.w1.screenshots",
+            "repos.myrepo.llpm.tasks.TASK-001.agent-workers.w1.screenshots.login",
+        ])
+        with patch("urllib.request.urlopen", side_effect=side_effect):
+            store.delete(ref)
+
+        assert deleted == [
+            "repos.myrepo.llpm.tasks.TASK-001.agent-workers.w1.screenshots.login",
+            "repos.myrepo.llpm.tasks.TASK-001.agent-workers.w1.screenshots",
+            "repos.myrepo.llpm.tasks.TASK-001.agent-workers.w1",
+            "repos.myrepo.llpm.tasks.TASK-001",
+        ]
+
+    def test_delete_tolerates_subnote_already_gone(self, store):
+        ref = VaultRef("repos.myrepo.llpm.tasks.TASK-001")
+        gone = "repos.myrepo.llpm.tasks.TASK-001.agent-workers.w1"
+        side_effect, deleted = self._delete_recorder([gone], fail={gone: 404})
+        with patch("urllib.request.urlopen", side_effect=side_effect):
+            store.delete(ref)
+        assert deleted == ["repos.myrepo.llpm.tasks.TASK-001"]
+
+    def test_delete_keeps_ticket_when_a_subnote_delete_fails(self, store):
+        # An interrupted delete must never leave subnotes under a missing ticket.
+        ref = VaultRef("repos.myrepo.llpm.tasks.TASK-001")
+        stuck = "repos.myrepo.llpm.tasks.TASK-001.agent-workers.w1"
+        side_effect, deleted = self._delete_recorder([stuck], fail={stuck: 500})
+        with patch("urllib.request.urlopen", side_effect=side_effect):
+            with pytest.raises(urllib.error.HTTPError):
+                store.delete(ref)
+        assert deleted == []
+
+
 class TestMdTreeStoreArchiveDelete:
     def test_archive(self, store):
         ref = VaultRef("repos.myrepo.llpm.tasks.TASK-001")
@@ -276,7 +449,11 @@ class TestMdTreeStoreArchiveDelete:
         with patch("urllib.request.urlopen") as mock_open:
             mock_open.return_value = _response({"stem": ref.vault_stem, "dangling": []})
             store.delete(ref)
-        mock_open.assert_called_once()
+        # One listing for notes below the ticket (none here), then the DELETE.
+        assert mock_open.call_count == 2
+        last = mock_open.call_args_list[-1].args[0]
+        assert last.get_method() == "DELETE"
+        assert last.full_url.endswith("repos.myrepo.llpm.tasks.TASK-001")
 
 
 class TestMdTreeStoreBlobs:

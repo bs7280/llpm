@@ -129,6 +129,64 @@ class TestLocalDirStoreArchiveDelete:
         assert store.read("TASK-001") is None
 
 
+class TestLocalDirStoreSubnotes:
+    """``<ID>.<…>.md`` beside a ticket is a note below it (FEAT-014) -- the
+    dotted-filename spelling of a vault child stem -- never a ticket."""
+
+    WORKER = "TASK-001.agent-workers.sonnet-a3f9.md"
+    CHILD = "TASK-001.agent-workers.sonnet-a3f9.test-report.md"
+
+    def _write_subnotes(self, docs_root):
+        tickets = docs_root / "tickets"
+        # Frontmatter that would parse as a ticket if it were ever listed.
+        (tickets / self.WORKER).write_text("---\ntype: agent-run\nstatus: running\n---\n## Summary\n")
+        (tickets / self.CHILD).write_text("---\ntitle: Test report\n---\nall green\n")
+
+    def test_list_ignores_subnotes(self, docs_root):
+        store = LocalDirStore(docs_root)
+        before = store.list_tickets()
+        self._write_subnotes(docs_root)
+        assert store.list_tickets() == before
+
+    def test_read_finds_the_ticket_not_the_worker_note(self, docs_root):
+        # "." sorts before "_", so the worker file would win the ID prefix match.
+        self._write_subnotes(docs_root)
+        ref, fm, _ = LocalDirStore(docs_root).read("TASK-001")
+        assert ref.name == "TASK-001_ADD_PYYAML.md"
+        assert fm["id"] == "TASK-001"
+
+    def test_subnotes(self, docs_root):
+        store = LocalDirStore(docs_root)
+        ref, _, _ = store.read("TASK-001")
+        assert store.subnotes(ref) == []
+        self._write_subnotes(docs_root)
+        assert store.subnotes(ref) == [self.WORKER, self.CHILD]
+
+    def test_subnotes_do_not_cross_id_prefixes(self, docs_root):
+        (docs_root / "tickets" / "TASK-0010.agent-workers.w1.md").write_text("x\n")
+        store = LocalDirStore(docs_root)
+        ref, _, _ = store.read("TASK-001")
+        assert store.subnotes(ref) == []
+
+    def test_archive_carries_subnotes(self, docs_root):
+        self._write_subnotes(docs_root)
+        store = LocalDirStore(docs_root)
+        ref, _, _ = store.read("TASK-001")
+        dst = store.archive(ref)
+        archive = docs_root / "tickets" / "archive"
+        assert (archive / self.WORKER).exists() and (archive / self.CHILD).exists()
+        assert not (docs_root / "tickets" / self.WORKER).exists()
+        assert store.subnotes(dst) == [self.WORKER, self.CHILD]
+
+    def test_delete_removes_subnotes(self, docs_root):
+        self._write_subnotes(docs_root)
+        store = LocalDirStore(docs_root)
+        ref, _, _ = store.read("TASK-001")
+        store.delete(ref)
+        assert not ref.exists()
+        assert not list((docs_root / "tickets").glob("TASK-001.*"))
+
+
 class TestLocalDirStoreBlobs:
     def test_read_blob_missing(self, docs_root):
         store = LocalDirStore(docs_root)
@@ -219,6 +277,9 @@ class FakeStore:
 
     def delete(self, ref):
         del self._bucket(ref)[ref.name]
+
+    def subnotes(self, ref):
+        return []
 
     def read_blob(self, name):
         return self.blobs.get(name)
