@@ -427,16 +427,41 @@ def _as_hours(value) -> float | None:
         return None
 
 
-def _ticket_to_dict(store: TicketStore, path: Path, fm: dict, body: str | None = None) -> dict:
+def _children_index(tickets) -> dict[str, list[str]]:
+    """parent id -> child ids, built once from an already-loaded ticket list.
+
+    TASK-012: ``get_children`` reloads the whole board per call, which made every
+    JSON listing O(n^2) in vault requests (153 tickets ~ 24k requests, ~16 min).
+    Archived tickets are excluded, matching ``get_children(include_archive=False)``.
+    """
+    index: dict[str, list[str]] = {}
+    for path, fm, *_ in tickets:
+        parent = fm.get("parent")
+        if parent and "archive" not in path.parts:
+            index.setdefault(str(parent).upper(), []).append(fm.get("id"))
+    return index
+
+
+def _ticket_to_dict(
+    store: TicketStore,
+    path: Path,
+    fm: dict,
+    body: str | None = None,
+    children_by_parent: dict[str, list[str]] | None = None,
+) -> dict:
     """Serialize a ticket to the JSON output schema.
 
     If body is None, it is omitted (list mode). If provided, it is included (show mode).
+    ``children_by_parent`` (from ``_children_index``) lets listings resolve children
+    without reloading the board per ticket; ``show`` passes nothing and pays one load.
     """
     eff_status = parser.effective_status(store, fm)
     is_blocked = eff_status == "blocked"
 
-    children = parser.get_children(store, fm["id"])
-    child_ids = [c["id"] for c in children]
+    if children_by_parent is not None:
+        child_ids = list(children_by_parent.get(str(fm["id"]).upper(), []))
+    else:
+        child_ids = [c["id"] for c in parser.get_children(store, fm["id"])]
 
     blocker_details = parser.get_blocker_details(store, fm) if fm.get("blockers") else []
 
@@ -573,7 +598,9 @@ def cmd_list(args) -> None:
     filtered.sort(key=lambda item: _priority_key(item[1]))
 
     if use_json:
-        _json_out([_ticket_to_dict(store, path, fm) for path, fm, _ in filtered])
+        idx = _children_index(tickets)
+        _json_out([_ticket_to_dict(store, path, fm, children_by_parent=idx)
+                   for path, fm, _ in filtered])
         return
 
     if not filtered:
@@ -605,10 +632,11 @@ def cmd_board(args) -> None:
         items.sort(key=lambda item: _priority_key(item[1]))
 
     if use_json:
+        idx = _children_index(tickets)
         result = []
         for col_name in ("blocked", "open", "in-progress", "review"):
             for path, fm in columns[col_name]:
-                result.append(_ticket_to_dict(store, path, fm))
+                result.append(_ticket_to_dict(store, path, fm, children_by_parent=idx))
         _json_out(result)
         return
 
@@ -649,10 +677,11 @@ def cmd_backlog(args) -> None:
             sections[status].append((path, fm))
 
     if use_json:
+        idx = _children_index(tickets)
         result = []
         for section in ("planned", "draft"):
             for path, fm in sections[section]:
-                result.append(_ticket_to_dict(store, path, fm))
+                result.append(_ticket_to_dict(store, path, fm, children_by_parent=idx))
         _json_out(result)
         return
 

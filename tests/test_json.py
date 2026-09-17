@@ -29,6 +29,21 @@ def run_json(*args, docs_root=None, capsys=None):
 
 
 class TestListJson:
+    def test_listings_never_reload_the_board_per_ticket(self, docs_root, capsys):
+        """TASK-012: list/board/backlog --json resolved `children` through
+        parser.get_children, which loads every ticket again for EACH ticket --
+        O(n^2) vault requests on the mdtree store (~16 min on a 153-ticket
+        board). Listings must build the parent->children index once."""
+        with patch.object(parser, "get_children",
+                          side_effect=AssertionError("board reloaded per ticket")):
+            listed = run_json("list", "--json", "--include-archived", docs_root=docs_root, capsys=capsys)
+            run_json("board", "--json", docs_root=docs_root, capsys=capsys)
+            run_json("backlog", "--json", docs_root=docs_root, capsys=capsys)
+        # ...and the index agrees with the reference implementation, ticket by ticket
+        for t in listed:
+            expected = sorted(c["id"] for c in parser.get_children(docs_root, t["id"]))
+            assert sorted(t["children"]) == expected, t["id"]
+
     def test_returns_array(self, docs_root, capsys):
         data = run_json("list", "--json", docs_root=docs_root, capsys=capsys)
         assert isinstance(data, list)
