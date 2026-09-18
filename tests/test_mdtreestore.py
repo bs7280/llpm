@@ -815,3 +815,79 @@ class TestConfigTomlDiscovery:
         class Args: docs_root = None
         cfg = _resolve_store_config(Args())
         assert "from_env" in str(cfg["docs_root"])
+
+
+# ---------------------------------------------------------------------------
+# load_frontmatter: a whole board in ONE request (the board-load fast path)
+# ---------------------------------------------------------------------------
+
+def _listing(items: list[dict]) -> dict:
+    return {"items": items, "total": len(items), "limit": 1000, "offset": 0}
+
+
+def _fm(ticket_id: str, **over) -> dict:
+    fm = {"id": ticket_id, "type": "task", "title": f"T {ticket_id}",
+          "status": "open", "priority": "medium"}
+    fm.update(over)
+    return fm
+
+
+class TestLoadFrontmatter:
+    NS = "repos.myrepo.llpm"
+
+    def _page(self):
+        return _listing([
+            {"stem": f"{self.NS}.tasks.TASK-001", "frontmatter": _fm("TASK-001")},
+            {"stem": f"{self.NS}.features.FEAT-001", "frontmatter": _fm("FEAT-001", type="feature")},
+            {"stem": f"{self.NS}.archive.TASK-000", "frontmatter": _fm("TASK-000", status="complete")},
+            # never tickets: a note BELOW a ticket, and the board's own blobs
+            {"stem": f"{self.NS}.tasks.TASK-001.agent-workers.w1", "frontmatter": _fm("TASK-001")},
+            {"stem": f"{self.NS}.todo", "frontmatter": {}},
+        ])
+
+    def test_one_request_for_the_whole_board(self, store):
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.return_value = _response(self._page())
+            pairs = store.load_frontmatter()
+
+        # THE point of this method: one round trip, not one per ticket
+        assert mock_open.call_count == 1
+        url = mock_open.call_args[0][0]
+        assert "include=frontmatter" in url
+        assert [ref.name for ref, _ in pairs] == ["TASK-000", "FEAT-001", "TASK-001"]
+        assert [fm["id"] for _, fm in pairs] == ["TASK-000", "FEAT-001", "TASK-001"]
+
+    def test_subnotes_and_blobs_are_not_tickets(self, store):
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.return_value = _response(self._page())
+            stems = [ref.vault_stem for ref, _ in store.load_frontmatter()]
+        assert f"{self.NS}.tasks.TASK-001.agent-workers.w1" not in stems
+        assert f"{self.NS}.todo" not in stems
+
+    def test_include_archive_false_drops_the_archive(self, store):
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.return_value = _response(self._page())
+            pairs = store.load_frontmatter(include_archive=False)
+        assert [ref.name for ref, _ in pairs] == ["FEAT-001", "TASK-001"]
+        assert all(not ref.is_archived for ref, _ in pairs)
+
+    def test_falls_back_per_stem_when_the_vault_cannot_include_frontmatter(self, store):
+        """An older vault answers the listing without a `frontmatter` key."""
+        listing = _listing([{"stem": f"{self.NS}.tasks.TASK-001"}])
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.side_effect = [_response(listing), _response(_fm("TASK-001"))]
+            pairs = store.load_frontmatter()
+
+        assert [fm["id"] for _, fm in pairs] == ["TASK-001"]
+        assert mock_open.call_count == 2
+        assert mock_open.call_args_list[1][0][0].endswith("/frontmatter")
+
+    def test_an_unreadable_note_is_skipped_not_fatal(self, store):
+        listing = _listing([
+            {"stem": f"{self.NS}.tasks.TASK-001"},          # frontmatter fetch 404s
+            {"stem": f"{self.NS}.tasks.TASK-002", "frontmatter": _fm("TASK-002")},
+        ])
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.side_effect = [_response(listing), _http_error(404)]
+            pairs = store.load_frontmatter()
+        assert [fm["id"] for _, fm in pairs] == ["TASK-002"]

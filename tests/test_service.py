@@ -179,7 +179,7 @@ class TestDerivation:
         """`_derive` resolves blockers once and derives the status from the
         details, instead of asking `effective_status` to resolve them again.
         The answers must stay identical."""
-        for ref, fm, _ in parser.load_all_tickets(store, include_archive=True):
+        for ref, fm in parser.load_all_tickets(store, include_archive=True):
             derived, _, _ = service._derive(store, fm)
             assert derived == parser.effective_status(store, fm), fm["id"]
 
@@ -196,6 +196,48 @@ class TestDerivation:
         service.ticket_dict(store, ref, fm, children_by_parent={})
 
         assert sorted(reads) == ["FEAT-001", "FEAT-002"]
+
+    def test_a_board_load_does_not_read_ticket_by_ticket(self, docs_root):
+        """The board is loaded ONCE and everything else answers from it.
+
+        A listing used to cost a round trip per ticket (the body, which no
+        caller wanted) plus one per blocker. Against the vault that was the
+        whole latency of the endpoint: ~63 requests for a 40-ticket board,
+        ~25 s from inside a container where each one pays a fresh handshake.
+        `load_frontmatter` answers the board in one call and `board_index`
+        resolves blockers out of it, so neither count may grow with the board
+        again without this test saying so.
+        """
+        store = load_fake_store(docs_root)
+        loads, blocker_reads = [], []
+        real_load, real_read = store.load_frontmatter, store.read
+        store.load_frontmatter = lambda **kw: (loads.append(kw), real_load(**kw))[1]
+        store.read = lambda tid: (blocker_reads.append(tid), real_read(tid))[1]
+
+        tickets = service.list_tickets(store, include_archive=True)
+
+        assert len(tickets) > 1  # the board is not trivially empty
+        assert len(loads) == 1  # ONE board read, however many tickets there are
+        assert blocker_reads == []  # blockers came from the map, not the store
+
+    def test_blockers_resolve_from_the_board_map(self, store):
+        """A hit answers from the map; a MISS still falls through to the store
+        -- an archived blocker isn't in an active-only board, and must not
+        read as 'not found' (which would wrongly block the ticket)."""
+        ref, fm, _ = service.read_ticket(store, "TASK-001")
+        fm = dict(fm, blockers=["FEAT-000"])  # FEAT-000 is archived + complete
+        by_id = service.board_index(parser.load_all_tickets(store, include_archive=False))
+
+        assert "FEAT-000" not in by_id
+        detail = parser.get_blocker_details(store, fm, by_id)[0]
+        assert (detail["status"], detail["resolved"]) == ("complete", True)
+
+    def test_board_index_answers_without_the_store(self, store):
+        """What the map is for: resolving a blocker with the store unplugged."""
+        by_id = service.board_index(parser.load_all_tickets(store, include_archive=True))
+        fm = {"blockers": ["FEAT-001"]}
+        detail = parser.get_blocker_details(None, fm, by_id)[0]
+        assert (detail["id"], detail["resolved"]) == ("FEAT-001", True)
 
     def test_terminal_status_survives_unresolved_blockers(self, store):
         """A complete ticket stays complete however its blockers look."""

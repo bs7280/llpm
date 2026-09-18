@@ -89,14 +89,29 @@ def children_index(tickets) -> dict[str, list[str]]:
     Archived tickets are excluded, matching ``get_children(include_archive=False)``.
     """
     index: dict[str, list[str]] = {}
-    for path, fm, *_ in tickets:
+    for path, fm in tickets:
         parent = fm.get("parent")
         if parent and "archive" not in path.parts:
             index.setdefault(str(parent).upper(), []).append(fm.get("id"))
     return index
 
 
-def _derive(store: TicketStore, fm: dict) -> tuple[str, list[dict], list[dict]]:
+def board_index(tickets) -> dict[str, dict]:
+    """ID -> frontmatter, from an already-loaded ticket list.
+
+    The blocker half of what ``children_index`` does for parents: every blocker
+    is an intra-board ID, so a board that is already in memory can resolve them
+    without going back to the store. On the vault that is the difference
+    between one request per blocker and none.
+    """
+    return {
+        str(fm["id"]).upper(): fm for _, fm in tickets if fm.get("id")
+    }
+
+
+def _derive(
+    store: TicketStore, fm: dict, by_id: dict[str, dict] | None = None
+) -> tuple[str, list[dict], list[dict]]:
     """``(effective_status, blocker_details, waits_details)`` in one pass.
 
     ``parser.effective_status`` resolves every blocker to answer one yes/no
@@ -107,7 +122,9 @@ def _derive(store: TicketStore, fm: dict) -> tuple[str, list[dict], list[dict]]:
     blocker comes back ``resolved: False``, which is exactly what made
     ``is_blocked`` say True.
     """
-    blocker_details = parser.get_blocker_details(store, fm) if fm.get("blockers") else []
+    blocker_details = (
+        parser.get_blocker_details(store, fm, by_id) if fm.get("blockers") else []
+    )
     waits_details = parser.get_waits_on_details(store, fm)
 
     stored = fm.get("status", "draft")
@@ -127,14 +144,16 @@ def ticket_dict(
     fm: dict,
     body: str | None = None,
     children_by_parent: dict[str, list[str]] | None = None,
+    board_by_id: dict[str, dict] | None = None,
 ) -> dict:
     """Serialize a ticket to the JSON output schema.
 
     If body is None, it is omitted (list mode). If provided, it is included (show mode).
     ``children_by_parent`` (from ``children_index``) lets listings resolve children
     without reloading the board per ticket; ``show`` passes nothing and pays one load.
+    ``board_by_id`` (from ``board_index``) does the same for blockers.
     """
-    eff_status, blocker_details, waits_details = _derive(store, fm)
+    eff_status, blocker_details, waits_details = _derive(store, fm, board_by_id)
     is_blocked = eff_status == "blocked"
 
     if children_by_parent is not None:
@@ -225,7 +244,11 @@ def load_board(store: TicketStore, *, include_archive: bool = False) -> list[dic
     """
     tickets = parser.load_all_tickets(store, include_archive=include_archive)
     index = children_index(tickets)
-    dicts = [ticket_dict(store, ref, fm, children_by_parent=index) for ref, fm, _ in tickets]
+    by_id = board_index(tickets)
+    dicts = [
+        ticket_dict(store, ref, fm, children_by_parent=index, board_by_id=by_id)
+        for ref, fm in tickets
+    ]
     dicts.sort(key=_priority_key)
     return dicts
 

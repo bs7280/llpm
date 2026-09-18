@@ -121,6 +121,24 @@ class TicketStore(Protocol):
         this protocol method) returns ``[]``."""
         ...
 
+    def load_frontmatter(self, include_archive: bool = True) -> list[tuple[Path, dict]]:
+        """Every ticket's ``(ref, frontmatter)``, however this store gets it
+        cheapest -- the read behind every listing, board view and rollup.
+
+        Separate from ``list_tickets`` + ``read_ref`` because NOTHING that
+        walks a whole board wants the bodies, and on a remote store fetching
+        them is the entire cost: the vault answers one
+        ``?include=frontmatter`` request with the whole board, where per-ref
+        reads are one HTTP round trip per ticket. Optional -- callers reach it
+        through ``parser.load_all_tickets``, which falls back to the per-ref
+        walk for a store that doesn't implement it (a local directory has
+        nothing to gain, since it parses the file either way).
+
+        Tickets whose frontmatter won't parse are skipped, not fatal, matching
+        the per-ref walk.
+        """
+        ...
+
 
 class LocalDirStore:
     """Behavior-preserving filesystem implementation of TicketStore.
@@ -210,6 +228,21 @@ class LocalDirStore:
     def read_foreign(self, stem: str) -> tuple[str, dict | None]:
         # A local directory has no vault to resolve foreign stems against.
         return ("unavailable", None)
+
+    def load_frontmatter(self, include_archive: bool = True) -> list[tuple[Path, dict]]:
+        """The per-ref walk, minus the bodies. A local directory reads the
+        whole file either way, so there is nothing to batch here -- this
+        exists so every store answers the same question, and the remote
+        store's one-request version isn't a special case callers must know
+        about."""
+        pairs: list[tuple[Path, dict]] = []
+        for ref in self.list_tickets(include_archive=include_archive):
+            try:
+                fm, _body = self.read_ref(ref)
+            except (ValueError, yaml.YAMLError):
+                continue  # unparseable ticket: skipped, never fatal
+            pairs.append((ref, fm))
+        return pairs
 
     def scan_by_type(self, type_value: str) -> list[tuple[str, dict]]:
         # A local dir has no vault -- this only sees its own tickets dir.
@@ -466,9 +499,11 @@ class MdTreeStore:
     # silently drops real tickets -- and next_id then mints an ID that exists.
     _LIST_PAGE_SIZE = 1000
 
-    def _list_pattern(self, pattern: str) -> list[dict]:
+    def _list_pattern(self, pattern: str, include_frontmatter: bool = False) -> list[dict]:
         """List every note matching a glob pattern, following ``total`` /
-        ``offset`` until exhausted. Returns list of {stem, title} dicts."""
+        ``offset`` until exhausted. Returns list of {stem, title} dicts --
+        plus ``frontmatter`` per item when ``include_frontmatter`` is set,
+        which is what makes a whole-board read one request."""
         items: list[dict] = []
         seen: set[str] = set()
         offset = 0
@@ -477,6 +512,7 @@ class MdTreeStore:
                 self._base
                 + "/api/v1/notes?pattern="
                 + urllib.parse.quote(pattern, safe="")
+                + ("&include=frontmatter" if include_frontmatter else "")
                 + f"&limit={self._LIST_PAGE_SIZE}&offset={offset}"
             )
             data = self._get_json(url)
@@ -545,6 +581,45 @@ class MdTreeStore:
                     refs.append(VaultRef(vault_stem=item["stem"], is_archived=True))
 
         return sorted(refs, key=lambda r: r.vault_stem)
+
+    def load_frontmatter(self, include_archive: bool = True) -> list[tuple[VaultRef, dict]]:
+        """The whole board's frontmatter in ONE request (see the protocol).
+
+        ``?include=frontmatter`` over the board's own family returns every
+        ticket's parsed frontmatter alongside its stem, so a board load costs
+        one round trip instead of a listing per bucket plus a ``/raw`` fetch
+        per ticket. On this repo's board that is 1 request where the per-ref
+        walk took 45, and from inside a container -- where every request pays
+        a fresh DNS + TCP + TLS handshake -- it is the difference between
+        ~25 s and well under one.
+
+        Degrades the way the rest of this store does: a vault that doesn't
+        support ``include=frontmatter`` (no ``frontmatter`` key in its items)
+        falls back to per-stem frontmatter fetches, and a ticket whose
+        frontmatter won't parse is skipped rather than failing the board.
+        """
+        pairs: list[tuple[VaultRef, dict]] = []
+        for item in self._list_pattern(f"{self._ns}.*", include_frontmatter=True):
+            stem = item["stem"]
+            if not self._is_ticket_stem(stem):
+                continue  # a note BELOW a ticket is never a ticket
+            ref = self._ref_for_stem(stem)
+            if ref.is_archived and not include_archive:
+                continue
+            fm = item.get("frontmatter")
+            if fm is None:  # vault predating include=frontmatter on listings
+                fm = self._get_frontmatter(stem)
+            if fm:
+                pairs.append((ref, fm))
+        return sorted(pairs, key=lambda p: p[0].vault_stem)
+
+    def _get_frontmatter(self, stem: str) -> dict | None:
+        """One note's frontmatter, for the pre-``include=frontmatter``
+        fallback. An unreadable note is skipped, never fatal."""
+        try:
+            return self._get_json(self._url(stem) + "/frontmatter") or {}
+        except (urllib.error.HTTPError, MdTreeStoreError):
+            return None
 
     def list_boards(self) -> list[str]:
         """Repo names that have an llpm board in this vault.

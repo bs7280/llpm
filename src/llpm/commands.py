@@ -471,7 +471,7 @@ def cmd_board(args) -> None:
     tickets = parser.load_all_tickets(store, include_archive=False)
     columns = {"blocked": [], "open": [], "in-progress": [], "review": []}
 
-    for path, fm, body in tickets:
+    for path, fm in tickets:
         eff_status = parser.effective_status(store, fm)
         if eff_status in columns:
             columns[eff_status].append((path, fm))
@@ -519,7 +519,7 @@ def cmd_backlog(args) -> None:
     tickets = parser.load_all_tickets(store, include_archive=False)
     sections = {"planned": [], "draft": []}
 
-    for path, fm, body in tickets:
+    for path, fm in tickets:
         status = fm.get("status")
         if status in sections:
             sections[status].append((path, fm))
@@ -994,7 +994,7 @@ def cmd_archive(args) -> None:
         # Find all closed/complete non-archived tickets
         tickets = parser.load_all_tickets(store, include_archive=False)
         to_archive = []
-        for path, fm, body in tickets:
+        for path, fm in tickets:
             if fm.get("status") in parser.RESOLVED_STATUSES:
                 to_archive.append((path, fm))
 
@@ -1044,7 +1044,7 @@ def cmd_delete(args) -> None:
     references = []
     children_of = []
 
-    for t_path, t_fm, t_body in all_tickets:
+    for t_path, t_fm in all_tickets:
         if t_fm["id"] == ticket_id:
             continue
         # Check if this ticket is in someone's blockers
@@ -1088,7 +1088,7 @@ def cmd_delete(args) -> None:
             return
 
     # Clean up references
-    for t_path, t_fm, t_body in all_tickets:
+    for t_path, t_fm in all_tickets:
         modified = False
         if t_fm["id"] == ticket_id:
             continue
@@ -1107,6 +1107,11 @@ def cmd_delete(args) -> None:
 
         if modified:
             t_fm["updated"] = _today()
+            # The board load carries no bodies; read the one ticket being
+            # rewritten so its body goes back untouched. A delete touches a
+            # handful of referencing tickets, so this is a handful of reads --
+            # not one per ticket on the board, which is what it replaced.
+            _, t_body = store.read_ref(t_path)
             _write_ticket(store, t_path, t_fm, t_body)
 
     store.delete(path)
@@ -1239,7 +1244,7 @@ def cmd_project(args) -> None:
 
     by_status: dict[str, int] = {}
     by_type: dict[str, int] = {}
-    for path, fm, body in tickets:
+    for path, fm in tickets:
         eff = parser.effective_status(store, fm)
         by_status[eff] = by_status.get(eff, 0) + 1
         t = fm.get("type", "unknown")

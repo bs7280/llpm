@@ -79,6 +79,12 @@ class FakeStore:
     def subnotes(self, ref):
         return list(self.subnote_names.get(ref.name, []))
 
+    def load_frontmatter(self, include_archive=True):
+        return [
+            (ref, self.read_ref(ref)[0])
+            for ref in self.list_tickets(include_archive=include_archive)
+        ]
+
     def read_blob(self, name):
         return self.blobs.get(name)
 

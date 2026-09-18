@@ -195,14 +195,27 @@ def find_ticket_by_id(docs_root: Path, ticket_id: str) -> Path | None:
     return None
 
 
-def load_all_tickets(docs_root: Path, include_archive: bool = True) -> list[tuple[Path, dict, str]]:
-    """Parse all tickets, skipping files that fail to parse."""
+def load_all_tickets(docs_root: Path, include_archive: bool = True) -> list[tuple[Path, dict]]:
+    """Every ticket as ``(ref, frontmatter)``, skipping ones that fail to parse.
+
+    NO BODIES, deliberately: nothing that walks a whole board has ever used
+    them -- board views, listings, rollups and orphan reports all read
+    frontmatter -- and on a remote store fetching them was the entire cost of
+    a board load (one HTTP round trip per ticket, thrown away). A store that
+    implements ``load_frontmatter`` answers the whole board in one request;
+    the rest fall back to the per-ref walk, minus the bodies. Callers that
+    want a body read that one ticket (``read_ticket`` / ``store.read``).
+    """
     store = _as_store(docs_root)
+    bulk = getattr(store, "load_frontmatter", None)
+    if bulk is not None:
+        return [(ref, fm) for ref, fm in bulk(include_archive=include_archive)]
+
     results = []
     for ref in store.list_tickets(include_archive=include_archive):
         try:
-            fm, body = store.read_ref(ref)
-            results.append((ref, fm, body))
+            fm, _body = store.read_ref(ref)
+            results.append((ref, fm))
         except (ValueError, yaml.YAMLError):
             continue
     return results
@@ -269,13 +282,34 @@ def is_blocked(docs_root: Path, frontmatter: dict) -> bool:
     return False
 
 
-def get_blocker_details(docs_root: Path, frontmatter: dict) -> list[dict]:
-    """Get detailed info about each blocker on a ticket."""
+def get_blocker_details(
+    docs_root: Path, frontmatter: dict, by_id: dict[str, dict] | None = None
+) -> list[dict]:
+    """Get detailed info about each blocker on a ticket.
+
+    ``by_id`` is an already-loaded ``{ID: frontmatter}`` map of the board
+    (``service.board_index``) -- the same trick as ``children_index``: blockers
+    are intra-board IDs, so a caller that has just loaded the whole board can
+    answer from it instead of paying ``store.read`` per blocker, which on the
+    vault store is an HTTP round trip (or several -- ``read`` tries each type
+    bucket in turn). A MISS still falls through to the store, so an archived
+    blocker -- which an active-only board map doesn't carry -- resolves as it
+    always did rather than reading as 'not found'.
+    """
     blockers = frontmatter.get("blockers") or []
     details = []
 
     store = _as_store(docs_root)
     for blocker_id in blockers:
+        hit = (by_id or {}).get(str(blocker_id).upper())
+        if hit is not None:
+            details.append({
+                "id": hit.get("id", blocker_id),
+                "status": hit.get("status", "unknown"),
+                "title": hit.get("title", "???"),
+                "resolved": hit.get("status") in RESOLVED_STATUSES,
+            })
+            continue
         try:
             found = store.read(blocker_id)
         except (ValueError, yaml.YAMLError):
@@ -366,7 +400,7 @@ def get_children(docs_root: Path, ticket_id: str) -> list[dict]:
     """Find all tickets that have parent == ticket_id. Derived at read time."""
     upper_id = ticket_id.upper()
     children = []
-    for path, fm, _ in load_all_tickets(docs_root, include_archive=False):
+    for path, fm in load_all_tickets(docs_root, include_archive=False):
         parent = fm.get("parent")
         if parent and parent.upper() == upper_id:
             children.append({
@@ -433,13 +467,13 @@ def get_goal_rollup(docs_root: Path) -> list[dict]:
     store = _as_store(docs_root)
     goal_notes = get_goal_notes(store)
     tickets = load_all_tickets(store, include_archive=True)
-    by_id = {fm["id"].upper(): fm for _, fm, _ in tickets if fm.get("id")}
+    by_id = {fm["id"].upper(): fm for _, fm in tickets if fm.get("id")}
 
     rollup = []
     for goal_stem, goal_fm in goal_notes:
         serving = [
             (fm, effective_status(store, fm))
-            for _, fm, _ in tickets
+            for _, fm in tickets
             if goal_stem in _goal_stems_served(fm, by_id)
         ]
         serving.sort(key=lambda item: item[0].get("id") or "")
@@ -491,10 +525,10 @@ def get_orphans(docs_root: Path) -> list[dict]:
     """
     store = _as_store(docs_root)
     tickets = load_all_tickets(store, include_archive=False)
-    by_id = {fm["id"].upper(): fm for _, fm, _ in tickets if fm.get("id")}
+    by_id = {fm["id"].upper(): fm for _, fm in tickets if fm.get("id")}
 
     orphans = []
-    for _, fm, _ in tickets:
+    for _, fm in tickets:
         if fm.get("origin") != "agent":
             continue
         if "triage" in (fm.get("tags") or []):
