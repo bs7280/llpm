@@ -437,7 +437,9 @@ def _build_parser():
             "repo stem, or the directory holding a local docs root): "
             "GET /<board>/tickets, GET /<board>/tickets/<ID>, GET /boards, /healthz. "
             "With --vault it serves every repos.*.llpm board in that vault from one "
-            "process. Needs the optional API extra: pip install 'llpm[api]'."
+            "process. The same board is also served to MCP clients at "
+            "POST /<board>/mcp -- the remote half of 'llpm mcp'. "
+            "Needs the optional API extra: pip install 'llpm[api]'."
         ),
         help="Serve the board(s) over HTTP (needs the llpm[api] extra)",
     )
@@ -447,6 +449,38 @@ def _build_parser():
                          help=f"Port (default: {commands.SERVE_DEFAULT_PORT})")
     p_serve.add_argument("--vault", default=None,
                          help="Vault base URL; serve every repos.*.llpm board it holds")
+
+    # -- mcp --
+    p_mcp = subparsers.add_parser(
+        "mcp",
+        description=(
+            "Serve this board to an MCP client over stdio, so an agent session "
+            "changes tickets through llpm's own rules -- intake policy, "
+            "provenance, the edge vocabulary, status transitions -- instead of "
+            "writing notes behind its back. Every tool is one service-layer "
+            "function, the same ones the CLI and the HTTP API call. Speaks "
+            "JSON-RPC on stdin/stdout and logs to stderr; needs no extra "
+            "(unlike 'llpm serve', which also mounts these tools remotely at "
+            "POST /<board>/mcp). Register it with: "
+            "claude mcp add llpm -- llpm mcp"
+        ),
+        help="Serve the board to an MCP client over stdio",
+    )
+    p_mcp.add_argument(
+        "--created-by", dest="created_by", metavar="ID",
+        help=(
+            "Provenance: agent/session id recorded on tickets this server "
+            "files. Default: LLPM_CREATED_BY, else the MCP client's own name "
+            "from the handshake."
+        ),
+    )
+    p_mcp.add_argument(
+        "--origin", choices=["human", "agent"],
+        help=(
+            "Provenance: who the tickets come from. Default: LLPM_ORIGIN, else "
+            "'agent' -- an MCP client is one."
+        ),
+    )
 
     p_help = subparsers.add_parser(
         "help",
@@ -495,6 +529,7 @@ def _run(args, parser, subparsers) -> None:
         "goals": commands.cmd_goals,
         "orphans": commands.cmd_orphans,
         "project": commands.cmd_project,
+        "mcp": commands.cmd_mcp,
         "serve": commands.cmd_serve,
         "skills": commands.cmd_skills,
         "todo": commands.cmd_todo,

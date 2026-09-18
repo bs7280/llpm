@@ -1462,7 +1462,66 @@ def cmd_serve(args) -> None:
 
     print(f"llpm serve: {label}")
     print(f"  http://{host}:{port}/boards")
+    print(f"  MCP clients: POST http://{host}:{port}/<board>/mcp")
     uvicorn.run(api.make_app(store_for, boards=boards), host=host, port=port)
+
+
+# -- mcp (FEAT-016) --
+
+def _resolve_mcp_identity(args) -> tuple[str, str | None]:
+    """``(origin, created_by)`` for tickets this MCP server files.
+
+    Same precedence as the CLI -- flag, then env -- with one deliberate
+    difference: an MCP client is an agent, so ``origin`` defaults to ``agent``
+    instead of being inferred from whether a ``created_by`` id happens to be
+    set. ``created_by`` may still come back None: the client names itself in the
+    handshake, and ``mcp.Session`` falls back to that.
+    """
+    created_by = getattr(args, "created_by", None) or os.environ.get("LLPM_CREATED_BY") or None
+    origin = getattr(args, "origin", None) or os.environ.get("LLPM_ORIGIN") or "agent"
+    if origin not in parser.VALID_ORIGINS:
+        print(
+            f"Error: Invalid origin '{origin}'. Must be one of: "
+            f"{', '.join(sorted(parser.VALID_ORIGINS))} (check LLPM_ORIGIN).",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return origin, created_by
+
+
+def cmd_mcp(args) -> None:
+    """Serve this board to one MCP client over stdio.
+
+    Stdout belongs to the protocol from here on, so the banner goes to stderr --
+    MCP clients show that stream in their logs. The board is whichever one the
+    usual config discovery finds, and the store lives for the whole session
+    (the read scope that keeps that honest is `service._begin_read_scope`).
+
+    Unlike `serve`, this needs no extra: `llpm.mcp` is stdlib + the service
+    layer, so the pyyaml-only install can hand an agent the full tool surface.
+    """
+    from . import mcp
+
+    cfg = _resolve_store_config(args)
+    docs_root: Path = cfg.get("docs_root", Path("/dev/null/mdtree-sentinel"))
+    store = _make_store_from_config(cfg)
+    _require_initialized(docs_root, store=store)
+
+    origin, created_by = _resolve_mcp_identity(args)
+    session = mcp.Session(
+        store,
+        auto_approve=_resolve_intake_config(args).get("auto_approve") or (),
+        created_by=created_by,
+        origin=origin,
+    )
+
+    where = cfg["base_url"] if cfg["kind"] == "mdtree" else docs_root
+    print(
+        f"llpm mcp: board {_board_name(cfg)!r} ({where}) -- "
+        f"{len(mcp.TOOLS)} tools on stdio",
+        file=sys.stderr,
+    )
+    mcp.serve_stdio(session)
 
 
 def cmd_skills(args) -> None:

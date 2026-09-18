@@ -47,6 +47,53 @@ stem = "myrepo"                        # repos.<stem>.llpm.* namespace
 ca   = "/path/to/rootCA.pem"           # optional — see TLS trust below
 ```
 
+## MCP server
+
+`llpm mcp` serves the board to an MCP client over stdio, so an agent session
+changes tickets through llpm's rules — intake policy, provenance, the edge
+vocabulary, status transitions — instead of writing notes behind its back. Every
+tool is one service-layer function, the same ones the CLI and the HTTP API call.
+
+Register it with Claude Code:
+
+```bash
+claude mcp add llpm -- llpm mcp        # run from the repo whose board you want
+```
+
+or, checked into the repo as `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "llpm": { "command": "llpm", "args": ["mcp"] }
+  }
+}
+```
+
+It needs no optional extra (stdlib + pyyaml), speaks JSON-RPC on stdin/stdout,
+and logs to stderr. The board is whichever one the store resolution above finds,
+so the server is started in the repo it belongs to.
+
+Thirteen tools: `list_tickets`, `get_ticket`, `create_ticket`, `set_status`,
+`set_fields`, and the four edge pairs `blocker_add`/`blocker_rm`,
+`after_add`/`after_rm`, `waits_add`/`waits_rm`, `serves_add`/`serves_rm`. Each
+answers with what its service function returns, and a rule llpm refuses comes
+back as a tool error carrying llpm's own message rather than a protocol failure.
+
+**Provenance.** Tickets filed through MCP are `origin: agent` (pass
+`origin: "human"` when relaying a request a person made) and therefore land
+`draft` unless the board's `[intake] auto_approve` list covers their type.
+`created_by` is the caller, resolved in this order: the argument on the call,
+then `--created-by` / `LLPM_CREATED_BY`, then the name the client gave in the
+MCP handshake. This server never runs git, so `set_status` records only the
+commit SHAs you name — the CLI is still what harvests them from a checkout.
+
+**Remotely.** `llpm serve` (the `llpm[api]` extra) mounts the same tools at
+`POST /<board>/mcp` over the streamable-HTTP transport — JSON in, JSON out, no
+SSE and no server-side session. Because nothing survives the request, an HTTP
+caller names `created_by` in the tool arguments, exactly as it does for
+`POST /<board>/tickets`.
+
 ## TLS trust for the vault store (`kind = "mdtree"`)
 
 The homelab serves `*.home.lab` with a certificate signed by a **mkcert** root

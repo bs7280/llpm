@@ -27,10 +27,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextlib import contextmanager
 
-from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException, Response
 from pydantic import BaseModel
 
-from . import service
+from . import mcp, service
 from .store import TicketStore
 
 StoreFor = Callable[[str], TicketStore]
@@ -266,6 +266,38 @@ def make_router(store_for: StoreFor, boards: Boards | None = None) -> APIRouter:
     @router.delete("/{repo}/tickets/{ticket_id}/serves")
     def delete_serves(repo: str, ticket_id: str, target: StemRef):
         return _edge(service.serves_rm, repo, ticket_id, target.stem)
+
+    # -- MCP (FEAT-016) -----------------------------------------------------
+    #
+    # The remote half of `llpm mcp`: the same `mcp.Session` over the streamable-
+    # HTTP transport, so an agent that can reach this mount gets the tool
+    # surface without a checkout. JSON in, JSON out, one message per request --
+    # no SSE and no server-side session, which is what lets any instance answer
+    # any request. The board is the path parameter, exactly as for the REST
+    # endpoints, so no tool needs a `repo` argument.
+    #
+    # Statelessness has one visible consequence: the `initialize` handshake that
+    # names the client doesn't outlive its request, so an HTTP caller names
+    # `created_by` in the tool arguments. That is the same ruling `TicketCreate`
+    # makes, for the same reason -- a server has no shell to infer identity from.
+
+    @router.post("/{repo}/mcp")
+    def post_mcp(repo: str, message: dict):
+        with _mapped():
+            session = mcp.Session(store_for(repo))
+        reply = session.handle(message)
+        if reply is None:
+            return Response(status_code=202)  # a notification: nothing to answer
+        return reply
+
+    @router.get("/{repo}/mcp")
+    def get_mcp(repo: str):
+        """The transport allows a server to offer no SSE stream, and this one
+        doesn't; saying so is a 405 rather than letting a client hang."""
+        raise HTTPException(
+            status_code=405,
+            detail="No SSE stream here -- POST JSON-RPC messages to this URL.",
+        )
 
     return router
 

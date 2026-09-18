@@ -11,6 +11,7 @@ Skipped entirely without the optional ``llpm[api]`` extra installed.
 
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -20,7 +21,7 @@ pytest.importorskip("fastapi", reason="needs the llpm[api] extra")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from conftest import load_fake_store  # noqa: E402
-from llpm import api, commands, service  # noqa: E402
+from llpm import api, commands, mcp, service  # noqa: E402
 from llpm.store import LocalDirStore  # noqa: E402
 
 
@@ -507,3 +508,66 @@ class TestOtherEdgeEndpoints:
                            ("serves", {"stem": "goals.nope"})):
             r = client.request("DELETE", f"/demo/tickets/FEAT-002/{edge}", json=body)
             assert r.status_code == 404, edge
+
+
+# ---------------------------------------------------------------------------
+# MCP over the streamable-HTTP transport (FEAT-016)
+#
+# The protocol itself is pinned in test_mcp.py; what matters here is that the
+# mount speaks it -- board from the path, JSON in and out, and a session that
+# deliberately does not outlive the request.
+# ---------------------------------------------------------------------------
+
+def rpc(client, method, params=None, message_id=1):
+    message = {"jsonrpc": "2.0", "id": message_id, "method": method}
+    if params is not None:
+        message["params"] = params
+    return client.post("/demo/mcp", json=message)
+
+
+class TestMcpEndpoint:
+    def test_initialize(self, client):
+        result = rpc(client, "initialize", {"protocolVersion": mcp.PROTOCOL_VERSION}).json()
+        assert result["result"]["serverInfo"]["name"] == "llpm"
+
+    def test_tools_are_listed(self, client):
+        tools = rpc(client, "tools/list").json()["result"]["tools"]
+        assert {t["name"] for t in tools} == {t.name for t in mcp.TOOLS}
+
+    def test_a_tool_call_reads_the_board_in_the_path(self, client):
+        result = rpc(client, "tools/call",
+                     {"name": "get_ticket", "arguments": {"id": "FEAT-001"}}).json()
+        assert json.loads(result["result"]["content"][0]["text"])["id"] == "FEAT-001"
+
+    def test_an_unknown_board_is_404_not_a_tool_error(self, client):
+        """The board is addressed by the transport, so a bad one fails there."""
+        r = client.post("/nosuch/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        assert r.status_code == 404
+
+    def test_a_notification_is_accepted_with_no_body(self, client):
+        r = client.post("/demo/mcp", json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+        assert r.status_code == 202
+        assert r.content == b""
+
+    def test_a_stateless_session_makes_the_caller_name_itself(self, client):
+        """No session survives the request, so `initialize` can't supply
+        provenance -- the same ruling POST /tickets makes."""
+        result = rpc(client, "tools/call", {
+            "name": "create_ticket",
+            "arguments": {"type": "task", "title": "Anonymous"},
+        }).json()["result"]
+        assert result["isError"] is True
+        assert "created_by" in result["content"][0]["text"]
+
+    def test_a_named_caller_can_file_one(self, client):
+        result = rpc(client, "tools/call", {
+            "name": "create_ticket",
+            "arguments": {"type": "task", "title": "Filed over MCP",
+                          "created_by": "agent-1"},
+        }).json()["result"]
+        created = json.loads(result["content"][0]["text"])
+        assert created["status"] == "draft"
+        assert client.get(f"/demo/tickets/{created['id']}").json()["created_by"] == "agent-1"
+
+    def test_no_sse_stream_says_so(self, client):
+        assert client.get("/demo/mcp").status_code == 405
