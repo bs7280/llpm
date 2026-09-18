@@ -1237,3 +1237,129 @@ class TestEveryEdgePair:
         after = frontmatter(store, ticket_id)
         for field in ("blockers", "after", "waits_on", "serves"):
             assert (after.get(field) or []) == (before.get(field) or [])
+
+
+# ---------------------------------------------------------------------------
+# lint_tickets (TASK-014)
+#
+# The dispatch-readiness report. The predicate itself is unit-tested in
+# test_parser.py; what these pin is the service's half: which tickets become
+# candidates, that only problem tickets come back, and that judging acceptance
+# criteria -- which needs a BODY -- costs one read per candidate and not one
+# per ticket on the board.
+# ---------------------------------------------------------------------------
+
+def _add_ticket(store, title, *, ticket_type="task", body=None, status="open", **fields):
+    """File a ticket on either store and drive it to ``status``."""
+    result = service.create_ticket(
+        store, ticket_type, title, body=body, origin="human",
+        created_by="test", today="2026-03-20",
+    )
+    ticket_id = result["id"]
+    if fields:
+        service.set_fields(store, ticket_id, fields, today="2026-03-20")
+    service.set_status(store, ticket_id, status, today="2026-03-20")
+    return ticket_id
+
+
+DISPATCHABLE_BODY = "## Acceptance Criteria\n\n- [ ] The thing works\n"
+
+
+class TestLintTickets:
+    def test_a_clean_ready_set_reports_nothing(self, store):
+        # TASK-001 is the fixture board's only `open` ticket and it is BLOCKED,
+        # so the default ready set is empty to begin with.
+        assert service.lint_tickets(store) == []
+
+    def test_a_ticket_with_no_criteria_is_reported(self, store):
+        ticket_id = _add_ticket(store, "No criteria", body="## Description\n\ndo it\n",
+                                effort="small", model_tier="standard")
+        report = service.lint_tickets(store)
+        assert [r["id"] for r in report] == [ticket_id]
+        assert report[0]["problems"] == ["no-ac"]
+
+    def test_the_documented_shape(self, store):
+        ticket_id = _add_ticket(store, "No criteria", body="## Description\n\ndo it\n")
+        entry = service.lint_tickets(store, ids=[ticket_id])[0]
+        assert entry == {
+            "id": ticket_id, "type": "task", "title": "No criteria",
+            # model_tier comes from the template; effort does not.
+            "status": "open", "problems": ["no-ac", "no-effort"],
+        }
+
+    def test_a_dispatchable_ticket_is_absent(self, store):
+        _add_ticket(store, "Ready", body=DISPATCHABLE_BODY,
+                    effort="small", model_tier="standard")
+        assert service.lint_tickets(store) == []
+
+    def test_requires_human_is_reported(self, store):
+        ticket_id = _add_ticket(store, "For a person", body=DISPATCHABLE_BODY,
+                                effort="small", model_tier="standard",
+                                requires_human=True)
+        assert service.lint_tickets(store) == [{
+            "id": ticket_id, "type": "task", "title": "For a person",
+            "status": "open", "problems": ["requires-human"],
+        }]
+
+    def test_named_ids_are_linted_whatever_their_status(self, store):
+        # FEAT-002 is in-progress, so it is never in the default ready set --
+        # naming it lints it anyway, and it has no ## Verification section.
+        report = service.lint_tickets(store, ids=["FEAT-002"])
+        assert [r["id"] for r in report] == ["FEAT-002"]
+        assert report[0]["problems"] == ["no-ac", "no-tier"]
+
+    def test_named_ids_keep_the_order_given(self, store):
+        report = service.lint_tickets(store, ids=["RESEARCH-001", "FEAT-002", "EPIC-001"])
+        assert [r["id"] for r in report] == ["RESEARCH-001", "FEAT-002", "EPIC-001"]
+
+    def test_an_unknown_id_is_not_found(self, store):
+        with pytest.raises(service.NotFound) as e:
+            service.lint_tickets(store, ids=["NOPE-999"])
+        assert str(e.value) == "Ticket 'NOPE-999' not found."
+
+    def test_status_filters_on_the_effective_status(self, store):
+        # TASK-001 is stored `open` but blocked -- it answers to `blocked`, the
+        # same rule every other listing filter follows.
+        assert [r["id"] for r in service.lint_tickets(store, status="blocked")] == ["TASK-001"]
+        assert service.lint_tickets(store, status="open") == []
+
+    def test_status_none_lints_the_whole_board(self, store):
+        reported = [r["id"] for r in service.lint_tickets(store, status=None)]
+        assert reported == ["EPIC-001", "FEAT-001", "FEAT-002", "RESEARCH-001", "TASK-001"]
+
+    def test_the_whole_board_comes_back_in_board_order(self, store):
+        # priority high -> low, then ID: exactly what `llpm list` prints.
+        board = service.load_board(store)
+        reported = [r["id"] for r in service.lint_tickets(store, status=None)]
+        assert reported == [t["id"] for t in board if t["id"] in reported]
+
+    def test_an_unknown_status_is_named(self, store):
+        with pytest.raises(service.Invalid) as e:
+            service.lint_tickets(store, status="nonsense")
+        assert "Invalid status: 'nonsense'" in str(e.value)
+
+    def test_bodies_are_read_once_per_candidate_only(self, docs_root):
+        """The cost rule: a board listing carries no bodies, so lint reads one
+        per CANDIDATE -- never one per ticket on the board."""
+        class CountingStore(FakeStore):
+            def __init__(self):
+                super().__init__()
+                self.body_reads = 0
+
+            def read_ref(self, ref):
+                self.body_reads += 1
+                return super().read_ref(ref)
+
+        loaded = load_fake_store(docs_root)
+        store = CountingStore()
+        store.active, store.archived = loaded.active, loaded.archived
+
+        store.body_reads = 0
+        service.lint_tickets(store, status="blocked")   # exactly one candidate
+        with_candidate = store.body_reads
+
+        store.body_reads = 0
+        service.lint_tickets(store, status="open")      # no candidates at all
+        without_candidate = store.body_reads
+
+        assert with_candidate - without_candidate == 1

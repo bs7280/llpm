@@ -48,6 +48,20 @@ llpm list --status open --json    # or: llpm board (OPEN column)
   ordering hint (never blocks) -- prefer one whose `after` tickets are already done.
 - If a ticket carries `model_tier` (`light`/`standard`/`heavy`), prefer ones tagged for your
   own tier, or untagged ones -- don't grab a `heavy`-tagged ticket as a light-tier worker.
+- `llpm lint` (TASK-014) names the tickets in the ready set that aren't dispatch-ready:
+  acceptance criteria missing or still the template placeholder (`no-ac`), no `effort`
+  (`no-effort`), no `model_tier` (`no-tier`), or `requires_human: true` (`requires-human` --
+  a human owns it, surface it rather than claim it). Run it alongside the listing and skip
+  what it flags:
+
+  ```bash
+  llpm lint --json                  # [] means the whole ready set is dispatchable
+  ```
+
+  Today that skip is **manual** -- `llpm lint` is a report and refuses nothing. Once FEAT-009
+  ships, `llpm next` filters the ready set on the same predicate, so flagged tickets are
+  simply never selected. A `no-ac` ticket you'd otherwise have to spec yourself belongs back
+  with the planner: leave it, don't write its criteria and then grade yourself against them.
 
 When FEAT-009 ships, replace this step with `llpm next` and drop the manual filtering above.
 
@@ -183,6 +197,7 @@ Stop the loop when:
 
 ```
 1. llpm list --status open --json        # select (manual until FEAT-009 ships llpm next)
+   llpm lint --json                      #   ...skipping what it flags (manual skip, for now)
 2. llpm status TASK-XXX in-progress      # claim
 3. [implement per llpm-worker]           # work
 4. [append_content -> ## Worklog]        # jot progress as you go, at the moment it happens

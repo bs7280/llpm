@@ -546,3 +546,122 @@ def get_orphans(docs_root: Path) -> list[dict]:
 
     orphans.sort(key=lambda o: o["id"] or "")
     return orphans
+
+
+# -- Dispatch readiness (TASK-014) --
+#
+# One predicate, two callers: `llpm lint` reports it and `llpm next` (FEAT-009)
+# filters the ready set on it being empty. It is deliberately a *pure* function
+# of one ticket's `(frontmatter, body)` -- no store, no board -- so neither
+# caller can grow its own notion of "dispatchable".
+
+# The body section a ticket type states its done-condition in. A type absent
+# from this map is not judged on one: an epic's Scope and a research note's
+# Conclusion are not criteria a worker implements against, so inventing a
+# heading for them would only manufacture findings.
+DISPATCH_CRITERIA_HEADING = {
+    "task": "Acceptance Criteria",
+    "feature": "Verification",
+}
+
+# Every code `dispatch_problems` can report, in the order it reports them,
+# with the line `llpm lint` prints as its legend. The dict IS the vocabulary --
+# a new code is added here and nowhere else.
+DISPATCH_PROBLEMS = {
+    "no-ac": "no acceptance criteria (task) / verification (feature) -- still the template placeholder, or missing",
+    "no-effort": "effort is unset -- the dispatcher can't size the run",
+    "requires-human": "requires_human: true -- not dispatchable by design; surface it, don't claim it",
+    "no-tier": "model_tier is unset -- the dispatcher can't choose a harness",
+}
+
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+# A bullet, a checkbox bullet, or an ordered-list marker -- stripped before a
+# line is judged, so `- [ ] _Criterion 1_` reads as the hint it is.
+_LIST_MARKER_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?")
+# `_like this_` / `*like this*` -- the italic hint every bundled template uses
+# for "fill me in". `**bold**` is real prose, hence the lookahead.
+_HINT_RE = re.compile(r"^(?:_.+_|\*(?!\*).+\*)$")
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
+
+
+def section_body(body: str, heading: str) -> str | None:
+    """The text under ``## <heading>``, or None when there is no such section.
+
+    Matched case-insensitively on the heading text at any depth, and ended by
+    the next heading at that depth or shallower -- so ``###`` subsections stay
+    inside. Fenced code blocks are skipped, because a ``# comment`` inside one
+    is not a heading and truncating a section on it would fake an empty one.
+    """
+    want = heading.strip().lower()
+    lines: list[str] = []
+    level: int | None = None
+    fenced = False
+
+    for line in (body or "").splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        elif not fenced:
+            match = _HEADING_RE.match(line)
+            if match:
+                depth = len(match.group(1))
+                if level is None:
+                    if match.group(2).strip().lower() == want:
+                        level = depth
+                    continue
+                if depth <= level:
+                    break
+                lines.append(line)
+                continue
+        if level is not None:
+            lines.append(line)
+
+    return None if level is None else "\n".join(lines)
+
+
+def is_placeholder(text: str) -> bool:
+    """True when a section holds nothing a worker could act on.
+
+    Empty, or every line is still a template hint: ``_Criterion 1_``,
+    ``- [ ] _Criterion 2_``, ``1. _How to verify this works_``. HTML comments
+    (the Worklog's own instructions are one) never count as content. One real
+    bullet is enough to make the section real -- this is a dispatch check, not
+    a quality review.
+    """
+    text = _HTML_COMMENT_RE.sub("", text or "")
+    for raw in text.splitlines():
+        line = _LIST_MARKER_RE.sub("", raw).strip()
+        if not line or _HINT_RE.match(line):
+            continue
+        return False
+    return True
+
+
+def dispatch_problems(frontmatter: dict, body: str | None) -> list[str]:
+    """Why this ticket is not ready to hand to a worker, as codes.
+
+    Empty means dispatchable. The codes come out in ``DISPATCH_PROBLEMS``
+    order, so the same ticket always reports the same list -- ``llpm lint``
+    prints it and ``llpm next`` gates on ``not dispatch_problems(...)``.
+
+    Judgement, not a validator: every input it reads is already stored and
+    already valid frontmatter. ``requires-human`` in particular is a finding,
+    not a defect -- it says a human owns this one.
+    """
+    problems = []
+
+    heading = DISPATCH_CRITERIA_HEADING.get(frontmatter.get("type"))
+    if heading is not None:
+        section = section_body(body or "", heading)
+        if section is None or is_placeholder(section):
+            problems.append("no-ac")
+
+    if frontmatter.get("effort") in (None, ""):
+        problems.append("no-effort")
+
+    if frontmatter.get("requires_human"):
+        problems.append("requires-human")
+
+    if frontmatter.get("model_tier") in (None, ""):
+        problems.append("no-tier")
+
+    return problems

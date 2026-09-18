@@ -456,3 +456,138 @@ class TestOrphanReport:
     def test_archived_ticket_excluded(self, docs_root):
         _write_agent_ticket(docs_root, "archive/TASK-999_OLD.md")
         assert parser.get_orphans(docs_root) == []
+
+
+# -- Dispatch readiness (TASK-014) --
+
+def _fm(**overrides) -> dict:
+    """A dispatchable task's frontmatter -- override one field per test."""
+    base = {
+        "id": "TASK-900", "type": "task", "title": "A task", "status": "open",
+        "priority": "medium", "effort": "small", "model_tier": "standard",
+        "requires_human": False,
+    }
+    base.update(overrides)
+    return base
+
+
+REAL_AC = "## Acceptance Criteria\n\n- [ ] The thing works\n"
+
+
+class TestSectionBody:
+    def test_missing_section_is_none(self):
+        assert parser.section_body("## Description\n\ntext\n", "Acceptance Criteria") is None
+
+    def test_reads_to_the_next_same_level_heading(self):
+        body = "## Acceptance Criteria\n\n- [ ] one\n\n## Notes\n\nnot criteria\n"
+        section = parser.section_body(body, "Acceptance Criteria")
+        assert "- [ ] one" in section
+        assert "not criteria" not in section
+
+    def test_subsections_stay_inside(self):
+        body = "## Verification\n\n### Manually\n\n- click it\n\n## Related\n\nelsewhere\n"
+        section = parser.section_body(body, "Verification")
+        assert "click it" in section
+        assert "elsewhere" not in section
+
+    def test_heading_match_is_case_insensitive(self):
+        assert parser.section_body("## acceptance criteria\n\n- [ ] one\n",
+                                   "Acceptance Criteria") is not None
+
+    def test_a_comment_inside_a_fence_is_not_a_heading(self):
+        # Without fence tracking the `# run it` line would end the section and
+        # the criteria below it would vanish -- a fake `no-ac`.
+        body = "## Acceptance Criteria\n\n```bash\n# run it\nmake test\n```\n\n- [ ] it passes\n"
+        section = parser.section_body(body, "Acceptance Criteria")
+        assert "- [ ] it passes" in section
+
+    def test_last_section_runs_to_the_end(self):
+        section = parser.section_body("## Notes\n\nstuff\n\n## Verification\n\n- done\n",
+                                      "Verification")
+        assert section.strip() == "- done"
+
+
+class TestIsPlaceholder:
+    @pytest.mark.parametrize("text", [
+        "",
+        "\n\n",
+        "_What needs to be done?_",
+        "- [ ] _Criterion 1_\n- [ ] _Criterion 2_",
+        "1. _How to verify this works_",
+        "*fill me in*",
+        "<!-- a template comment -->",
+    ])
+    def test_placeholders(self, text):
+        assert parser.is_placeholder(text) is True
+
+    @pytest.mark.parametrize("text", [
+        "- [ ] PyYAML in pyproject.toml",
+        "1. Run the suite and watch it pass",
+        "Prose stating the condition.",
+        "- [ ] _Criterion 1_\n- [ ] A real one",
+        "**bold is real prose**",
+    ])
+    def test_real_content(self, text):
+        assert parser.is_placeholder(text) is False
+
+
+class TestDispatchProblems:
+    def test_a_clean_ticket_has_no_problems(self):
+        assert parser.dispatch_problems(_fm(), REAL_AC) == []
+
+    def test_no_ac_when_the_section_is_missing(self):
+        assert parser.dispatch_problems(_fm(), "## Description\n\ndo it\n") == ["no-ac"]
+
+    def test_no_ac_when_the_section_is_still_the_placeholder(self):
+        body = "## Acceptance Criteria\n\n- [ ] _Criterion 1_\n- [ ] _Criterion 2_\n"
+        assert parser.dispatch_problems(_fm(), body) == ["no-ac"]
+
+    def test_one_real_bullet_clears_no_ac(self):
+        body = "## Acceptance Criteria\n\n- [ ] _Criterion 1_\n- [ ] A real one\n"
+        assert parser.dispatch_problems(_fm(), body) == []
+
+    def test_a_feature_is_judged_on_verification(self):
+        assert parser.dispatch_problems(_fm(type="feature"), REAL_AC) == ["no-ac"]
+        assert parser.dispatch_problems(
+            _fm(type="feature"), "## Verification\n\n1. Run the suite\n") == []
+
+    def test_a_type_with_no_criteria_heading_is_not_judged_on_one(self):
+        # Epics and research notes state no done-condition a worker implements
+        # against, so they never report no-ac.
+        assert parser.dispatch_problems(_fm(type="epic"), "## Objective\n\nship it\n") == []
+        assert parser.dispatch_problems(_fm(type="research"), "") == []
+
+    def test_no_effort(self):
+        assert parser.dispatch_problems(_fm(effort=None), REAL_AC) == ["no-effort"]
+
+    def test_requires_human(self):
+        assert parser.dispatch_problems(_fm(requires_human=True), REAL_AC) == ["requires-human"]
+
+    def test_no_tier(self):
+        assert parser.dispatch_problems(_fm(model_tier=None), REAL_AC) == ["no-tier"]
+        # An absent key reads the same as an explicit null.
+        fm = _fm()
+        del fm["model_tier"]
+        assert parser.dispatch_problems(fm, REAL_AC) == ["no-tier"]
+
+    def test_codes_come_out_in_vocabulary_order(self):
+        problems = parser.dispatch_problems(
+            _fm(effort=None, model_tier=None, requires_human=True), ""
+        )
+        assert problems == ["no-ac", "no-effort", "requires-human", "no-tier"]
+        assert problems == [c for c in parser.DISPATCH_PROBLEMS if c in problems]
+
+    def test_every_code_it_can_report_has_a_legend_line(self):
+        assert set(parser.DISPATCH_PROBLEMS) == {
+            "no-ac", "no-effort", "requires-human", "no-tier"}
+        assert all(parser.DISPATCH_PROBLEMS.values())
+
+    def test_a_ticket_straight_from_the_template_is_not_dispatchable(self, docs_root):
+        # The case that produced the ticket: TASK-052 reached the dispatcher
+        # with the template's own placeholder criteria.
+        fm, body = parser.parse_document(docs_root / "templates" / "task.md")
+        assert parser.dispatch_problems(fm, body) == ["no-ac", "no-effort"]
+
+    def test_a_feature_straight_from_the_template_is_not_dispatchable(self, docs_root):
+        fm, body = parser.parse_document(docs_root / "templates" / "feature.md")
+        assert "no-ac" in parser.dispatch_problems(fm, body)

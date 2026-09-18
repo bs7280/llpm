@@ -1677,3 +1677,121 @@ class TestIntakeConfigWithStoreOverride:
         main(["--docs-root", str(override_root), "orphans"])
         out = capsys.readouterr().out
         assert "No orphaned agent-created tickets." in out  # default warn mode, nothing to report yet
+
+
+# ---------------------------------------------------------------------------
+# cmd_lint (TASK-014)
+#
+# The printer over service.lint_tickets: what a planner reads before marking a
+# ticket open, and the exit code a dispatch script gates on. The predicate is
+# unit-tested in test_parser.py and the candidate set in test_service.py; these
+# pin the surface -- wording, JSON shape, exit codes.
+# ---------------------------------------------------------------------------
+
+DISPATCHABLE_BODY = "## Acceptance Criteria\n\n- [ ] The thing works\n"
+
+
+class TestLint:
+    def _open_ticket(self, docs_root, capsys, *args, body=DISPATCHABLE_BODY):
+        """File a human-origin ticket with a body (which lands it `open`)."""
+        run_cli("create", "task", "Fresh work", "--origin", "human",
+                "--body", body, *args, docs_root=docs_root)
+        capsys.readouterr()  # discard "Created TASK-00N ..."
+
+    def test_clean_ready_set_says_no_problems(self, docs_root, capsys):
+        # The fixture board's only `open` ticket (TASK-001) is blocked, so the
+        # default ready set is empty -- nothing to report.
+        run_cli("lint", docs_root=docs_root)
+        assert "No problems." in capsys.readouterr().out
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_a_dispatchable_open_ticket_is_not_reported(self, mock_today, docs_root, capsys):
+        # Body with real criteria + effort set; model_tier comes from the template.
+        self._open_ticket(docs_root, capsys, "--effort", "small")
+        run_cli("lint", docs_root=docs_root)
+        assert "No problems." in capsys.readouterr().out
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_an_open_ticket_with_placeholder_criteria_is_reported(self, mock_today, docs_root, capsys):
+        self._open_ticket(docs_root, capsys, "--effort", "small",
+                          body="## Acceptance Criteria\n\n- [ ] _Criterion 1_\n")
+        run_cli("lint", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "1 'open' ticket(s) not ready to dispatch" in out
+        assert "TASK-002" in out
+        assert "no-ac" in out
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_requires_human_is_reported(self, mock_today, docs_root, capsys):
+        self._open_ticket(docs_root, capsys, "--effort", "small", "--requires-human")
+        run_cli("lint", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "TASK-002" in out
+        assert "requires-human" in out
+        # ...and the legend explains why that is a finding, not a defect.
+        assert "not dispatchable by design" in out
+
+    def test_status_all_lints_the_whole_fixture_board(self, docs_root, capsys):
+        run_cli("lint", "--status", "all", docs_root=docs_root)
+        out = capsys.readouterr().out
+        lines = [ln for ln in out.splitlines() if ln.startswith("  ") and "-" in ln]
+        for ticket_id in ("EPIC-001", "FEAT-001", "FEAT-002", "RESEARCH-001", "TASK-001"):
+            assert ticket_id in out
+        # One line per ticket, and EPIC-001 (no effort, no tier) carries both codes.
+        assert sum(1 for ln in lines if ln.strip().startswith("EPIC-001")) == 1
+        assert "no-effort" in out and "no-tier" in out
+
+    def test_named_ids_are_linted_whatever_their_status(self, docs_root, capsys):
+        # FEAT-002 is in-progress: never in the default ready set, linted when named.
+        run_cli("lint", "FEAT-002", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "FEAT-002" in out
+        assert "no-ac" in out  # a feature is judged on ## Verification
+
+    def test_json_shape(self, docs_root, capsys):
+        import json
+        run_cli("lint", "TASK-001", "--json", docs_root=docs_root)
+        data = json.loads(capsys.readouterr().out)
+        assert data == [{
+            "id": "TASK-001", "type": "task", "title": "Add PyYAML dependency",
+            "status": "blocked", "problems": ["no-tier"],
+        }]
+
+    def test_json_is_an_empty_array_when_clean(self, docs_root, capsys):
+        import json
+        run_cli("lint", "--json", docs_root=docs_root)
+        assert json.loads(capsys.readouterr().out) == []
+
+    def test_exit_code_is_zero_even_with_problems(self, docs_root, capsys):
+        # A report is not a failure: `llpm lint` in a pipeline must not trip it.
+        run_cli("lint", "--status", "all", docs_root=docs_root)
+        assert "not ready to dispatch" in capsys.readouterr().out
+
+    def test_strict_exits_one_when_anything_is_reported(self, docs_root, capsys):
+        with pytest.raises(SystemExit) as e:
+            run_cli("lint", "--status", "all", "--strict", docs_root=docs_root)
+        assert e.value.code == 1
+        # The report still printed -- --strict changes the exit code, not the output.
+        assert "not ready to dispatch" in capsys.readouterr().out
+
+    def test_strict_exits_zero_when_clean(self, docs_root, capsys):
+        run_cli("lint", "--strict", docs_root=docs_root)
+        assert "No problems." in capsys.readouterr().out
+
+    def test_unknown_id_errors(self, docs_root, capsys):
+        with pytest.raises(SystemExit) as e:
+            run_cli("lint", "NOPE-999", docs_root=docs_root)
+        assert e.value.code == 1
+        assert "Ticket 'NOPE-999' not found." in capsys.readouterr().err
+
+    def test_unknown_status_errors(self, docs_root, capsys):
+        with pytest.raises(SystemExit) as e:
+            run_cli("lint", "--status", "nonsense", docs_root=docs_root)
+        assert e.value.code == 1
+        assert "Invalid status: 'nonsense'" in capsys.readouterr().err
+
+    def test_help_lists_the_command(self, docs_root, capsys):
+        run_cli("help", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "lint" in out
+        assert "dispatch-ready" in out

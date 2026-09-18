@@ -1370,6 +1370,45 @@ def cmd_orphans(args) -> None:
         print(f"  {o['id']:<12} {o['title']}  [{o['status']}]{by}")
 
 
+def cmd_lint(args) -> None:
+    """Dispatch-readiness report -- a pull-based check in the `orphans` mould.
+
+    Never a create-time or status-time failure: `llpm status <ID> open` still
+    succeeds on a ticket with no acceptance criteria. A planner or bridge runs
+    this *before* handing a ticket to a worker; `--strict` is the exit code a
+    script gates on.
+    """
+    store, docs_root = _resolve_store_and_root(args)
+
+    use_json = getattr(args, "json", False)
+    ids = list(getattr(args, "ids", None) or [])
+    status = getattr(args, "status", None) or "open"
+    if status == "all":
+        status = None
+
+    with _cli_errors():
+        report = service.lint_tickets(store, ids=ids, status=status)
+
+    if use_json:
+        _json_out(report)
+    elif not report:
+        print("No problems.")
+    else:
+        scope = "ticket(s)" if ids else f"'{status}' ticket(s)" if status else "ticket(s)"
+        print(f"-- {len(report)} {scope} not ready to dispatch --")
+        for r in report:
+            print(f"  {r['id']:<12} {r['title']}  [{r['status']}]  {', '.join(r['problems'])}")
+        print()
+        for code in parser.DISPATCH_PROBLEMS:
+            if any(code in r["problems"] for r in report):
+                print(f"  {code:<16} {parser.DISPATCH_PROBLEMS[code]}")
+
+    # Exit 0 always, so a report is never mistaken for a failure -- unless the
+    # caller asked for the opposite, which is the only reason --strict exists.
+    if getattr(args, "strict", False) and report:
+        raise SystemExit(1)
+
+
 # -- serve (FEAT-015) --
 
 # FastAPI and uvicorn are an optional extra: the core install stays pyyaml-only,

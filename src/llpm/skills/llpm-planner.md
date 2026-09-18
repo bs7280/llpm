@@ -164,6 +164,12 @@ Effort scale:
 Once a feature has a complete spec and tasks with clear acceptance criteria:
 
 ```bash
+# Check dispatch readiness FIRST -- `llpm lint` is the machine half of the
+# checklist below: acceptance criteria present and not still the template
+# placeholder (## Verification for a feature), `effort` set, `model_tier` set,
+# and it flags `requires_human: true` as "not for a worker".
+llpm lint TASK-001 TASK-002        # prints "No problems." when they're ready
+
 # Mark the feature as planned (spec is done)
 llpm status FEAT-001 planned
 
@@ -172,7 +178,13 @@ llpm status TASK-001 open
 llpm status TASK-002 open
 ```
 
+`llpm lint` reports, it never refuses: `llpm status TASK-001 open` succeeds even
+on a ticket it flags. Clearing it is your job, not the command's. With no IDs it
+lints the whole ready set (`--status all` for the board, `--json` for a script,
+`--strict` to make any finding a non-zero exit).
+
 **Only set a ticket to `open` when:**
+- `llpm lint <ID>` is clean
 - The spec is detailed enough for a worker to implement without guessing
 - All open questions have been answered
 - Files to modify are identified with concrete paths
@@ -221,6 +233,7 @@ llpm blocker add FEAT-001 --blocked-by TASK-005
 5. [ask user about open questions]       # resolve ambiguity
 6. llpm create task ... --parent FEAT-XXX  # break into tasks
 7. llpm blocker add TASK-X --blocked-by TASK-Y  # set dependencies
-8. llpm status FEAT-XXX planned          # mark spec as done
-9. llpm status TASK-XXX open             # mark tasks ready for workers
+8. llpm lint TASK-XXX                    # dispatch-ready? (AC, effort, tier)
+9. llpm status FEAT-XXX planned          # mark spec as done
+10. llpm status TASK-XXX open            # mark tasks ready for workers
 ```

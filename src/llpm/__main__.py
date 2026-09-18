@@ -415,6 +415,35 @@ def _build_parser():
     )
     p_orphans.add_argument("--json", action="store_true", help="Output as JSON array")
 
+    # -- lint --
+    p_lint = subparsers.add_parser(
+        "lint",
+        description=(
+            "Report which tickets are not ready to hand to a worker: acceptance "
+            "criteria missing or still the template placeholder ('no-ac' -- judged "
+            "on '## Acceptance Criteria' for a task, '## Verification' for a "
+            "feature), 'effort' unset ('no-effort'), 'requires_human: true' "
+            "('requires-human' -- not dispatchable by design, surface it rather "
+            "than claim it), 'model_tier' unset ('no-tier'). "
+            "A report, never a gate: like 'llpm orphans' this refuses nothing at "
+            "create or status time -- run it BEFORE marking a ticket open, or "
+            "before spawning a worker for one. Defaults to every ticket whose "
+            "effective status is 'open' (the ready set); name IDs to lint exactly "
+            "those whatever their status, or --status all for the whole board. "
+            "Exits 0 even when it reports problems; --strict exits 1 instead, for "
+            "scripts. 'llpm next' (FEAT-009) filters the ready set on the same "
+            "predicate."
+        ),
+        help="Report tickets that aren't dispatch-ready (AC, effort, tier)",
+    )
+    p_lint.add_argument("ids", nargs="*", metavar="ID",
+                        help="Ticket IDs to lint (default: every effectively-open ticket)")
+    p_lint.add_argument("--status", default="open",
+                        help="Effective status to lint (default: open; 'all' for every ticket)")
+    p_lint.add_argument("--json", action="store_true", help="Output as JSON array")
+    p_lint.add_argument("--strict", action="store_true",
+                        help="Exit 1 when any problem is reported (default: always exit 0)")
+
     # -- project --
     p_project = subparsers.add_parser(
         "project",
@@ -528,6 +557,7 @@ def _run(args, parser, subparsers) -> None:
         "delete": commands.cmd_delete,
         "goals": commands.cmd_goals,
         "orphans": commands.cmd_orphans,
+        "lint": commands.cmd_lint,
         "project": commands.cmd_project,
         "mcp": commands.cmd_mcp,
         "serve": commands.cmd_serve,

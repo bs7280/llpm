@@ -373,6 +373,67 @@ def list_boards(store: TicketStore) -> list[str]:
     return fn()
 
 
+# -- Dispatch readiness (TASK-014) -------------------------------------------
+
+# What ``lint_tickets(status=...)`` will filter on: every stored status plus
+# the derived one, because the filter runs against the *effective* status like
+# every other listing filter in llpm.
+LINT_STATUSES = parser.VALID_STATUSES | {"blocked"}
+
+
+def lint_tickets(
+    store: TicketStore, *, ids: list[str] | None = None, status: str | None = "open"
+) -> list[dict]:
+    """Dispatch-readiness report: the tickets a worker should NOT be handed yet.
+
+    Only tickets WITH problems come back -- an empty list is the clean answer,
+    which is what makes it a gate a bridge can run before spawning a worker
+    (``if lint: don't dispatch``) as well as a report a planner can read.
+
+    ``ids`` lints exactly those tickets, in the order given, whatever their
+    status (an unknown one raises ``NotFound``, because a caller naming a
+    ticket means it). Otherwise the candidates are the tickets whose
+    *effective* status matches ``status`` -- ``"open"``, the ready set, by
+    default; ``None`` for the whole board -- in the board's own priority order.
+
+    Cost: a board listing carries NO bodies (a board is read once, frontmatter
+    only), and judging acceptance criteria needs one. So this reads the body of
+    each *candidate* individually and of nothing else -- one extra request per
+    candidate on a vault store, never one per ticket on the board.
+    """
+    if status is not None and status not in LINT_STATUSES:
+        raise Invalid(
+            f"Invalid status: '{status}'. Must be one of: "
+            f"{', '.join(sorted(LINT_STATUSES))}"
+        )
+
+    if ids:
+        candidates = []
+        for ticket_id in ids:
+            _ref, fm, body = read_ticket(store, ticket_id)
+            effective, _blockers, _waits = _derive(store, fm)
+            candidates.append((fm, body, effective))
+    else:
+        board = filter_tickets(load_board(store), status=status)
+        candidates = []
+        for entry in board:
+            _ref, fm, body = read_ticket(store, entry["id"])
+            candidates.append((fm, body, entry["effective_status"]))
+
+    report = []
+    for fm, body, effective in candidates:
+        problems = parser.dispatch_problems(fm, body)
+        if problems:
+            report.append({
+                "id": fm.get("id"),
+                "type": fm.get("type"),
+                "title": fm.get("title"),
+                "status": effective,
+                "problems": problems,
+            })
+    return report
+
+
 # -- Write operations --------------------------------------------------------
 
 def _today() -> str:
