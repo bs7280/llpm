@@ -1,6 +1,7 @@
 """Shared fixtures for LLPM tests."""
 
 import shutil
+import threading
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -33,6 +34,11 @@ class FakeStore:
         self.foreign_reachable = True
         self.goal_notes = {}  # vault stem -> frontmatter (type: goal notes)
         self.subnote_names = {}  # ticket filename -> names of notes below it
+        # create_exclusive stands in for O_EXCL / the vault's conditional PUT,
+        # both of which are atomic at the storage layer. Two dict statements
+        # are not, so the fake takes a lock -- otherwise a concurrency test
+        # would fail against the double and pass against every real store.
+        self._create_lock = threading.Lock()
 
     def list_tickets(self, include_archive=True):
         refs = [PurePosixPath(name) for name in self.active]
@@ -56,10 +62,11 @@ class FakeStore:
         self._bucket(ref)[ref.name] = (dict(frontmatter), body)
 
     def create_exclusive(self, filename, content):
-        if filename in self.active or filename in self.archived:
-            raise FileExistsError(filename)
-        fm, body = parser.parse_text(content, source=filename)
-        self.active[filename] = (fm, body)
+        with self._create_lock:
+            if filename in self.active or filename in self.archived:
+                raise FileExistsError(filename)
+            fm, body = parser.parse_text(content, source=filename)
+            self.active[filename] = (fm, body)
         return PurePosixPath(filename)
 
     def archive(self, ref):

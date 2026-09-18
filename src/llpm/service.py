@@ -7,15 +7,19 @@ thin callers of the same functions. Service functions never print and never
 each caller renders in its own idiom (``Error: …`` + exit 1 for the CLI,
 404/422/409 for the API).
 
-FEAT-015 lands this in slices: TASK-016 brought the read side, TASK-017
-``set_status``. The rest of the writes -- ``create_ticket``, ``set_fields`` and
-the edge pairs -- belong here too and follow.
+FEAT-015 landed this in slices: TASK-016 the read side, TASK-017 ``set_status``,
+TASK-018 ``create_ticket``/``set_fields``, TASK-019 the four edge pairs. Every
+``cmd_*`` that touches ticket data is now a printer over one of these.
 """
 
 from __future__ import annotations
 
+import re
 from datetime import date
+from importlib import resources as importlib_resources
 from pathlib import Path
+
+import yaml
 
 from . import parser
 from .store import TicketStore
@@ -443,3 +447,690 @@ def set_status(
     if include_ticket:
         result["ticket"] = ticket_dict(store, ref, fm, body=body)
     return result
+
+
+# -- Create (TASK-018) -------------------------------------------------------
+
+_MAX_CREATE_RETRIES = 3
+
+
+def _slugify(title: str) -> str:
+    """Convert title to UPPER_SNAKE_CASE for filenames."""
+    cleaned = re.sub(r"[^a-zA-Z0-9\s]", "", title)
+    return "_".join(cleaned.upper().split())
+
+
+def _as_list(value) -> list[str]:
+    """``"a,b"`` or ``["a", "b"]`` -> ``["a", "b"]``.
+
+    The two callers spell a list differently: argparse collects one
+    comma-joined string, JSON carries an array. Both mean the same thing, so
+    the service takes either rather than making one caller pre-convert.
+    """
+    if value is None:
+        return []
+    parts = value if isinstance(value, (list, tuple)) else str(value).split(",")
+    return [s for s in (str(p).strip() for p in parts) if s]
+
+
+def resolve_template(store: TicketStore, ticket_type: str) -> str:
+    """Template text for a ticket type: store first, then bundled.
+
+    Store-first is what lets a board override a template (a vault
+    ``templates.*`` note, or the copies ``llpm init`` puts in a local docs
+    root) without every board needing to be seeded.
+    """
+    text = store.read_blob(f"templates/{ticket_type}.md")
+    if text is not None:
+        return text
+    bundled = Path(str(importlib_resources.files("llpm") / "templates" / f"{ticket_type}.md"))
+    if bundled.exists():
+        return bundled.read_text(encoding="utf-8")
+    raise Invalid(f"No template found for type '{ticket_type}'.")
+
+
+def inject_provenance(content: str, origin: str, created_by: str | None) -> str:
+    """Append provenance + ownership keys to rendered template frontmatter.
+
+    Textual insertion (not re-serialization) so template enum-hint comments
+    survive into the created ticket. Keys the template already carries are
+    left alone.
+    """
+    try:
+        fm, _ = parser.parse_text(content, source="<template>")
+    except (ValueError, yaml.YAMLError):
+        return content  # malformed template: let create fail/succeed as before
+
+    lines = []
+    if "managed_by" not in fm:
+        lines.append("managed_by: llpm")
+    if "origin" not in fm:
+        lines.append(f"origin: {origin}")
+    if created_by and "created_by" not in fm:
+        # created_by is caller input -- serialize the one line properly
+        lines.append(yaml.safe_dump({"created_by": created_by}, default_flow_style=False).strip())
+    if "commits" not in fm:
+        lines.append("commits: []")
+    if not lines:
+        return content
+
+    parts = content.split("---", 2)
+    fm_block = parts[1].rstrip("\n") + "\n" + "\n".join(lines) + "\n"
+    return "---" + fm_block + "---" + parts[2]
+
+
+def _render_template(
+    template_text: str,
+    *,
+    ticket_id: str,
+    title: str,
+    today: str,
+    status: str,
+    priority: str,
+    effort: str | None,
+    parent: str | None,
+    serves: list[str],
+    tags: list[str],
+    requires_human: bool,
+    body: str | None,
+    origin: str,
+    created_by: str | None,
+) -> str:
+    """Fill a template by string substitution, not by re-serializing YAML.
+
+    The templates carry enum-hint comments (``status: draft  # draft|open|…``)
+    that a parse/dump round trip would eat, so each optional field is a
+    targeted replacement of the default the template ships with.
+    """
+    content = template_text
+    content = content.replace("__ID__", ticket_id)
+    content = content.replace("__TITLE__", title)
+    content = content.replace("__DATE__", today)
+
+    # Replace status/priority in the template line (preserve comment)
+    content = re.sub(
+        r"^(status:\s*)draft(\s*#.*)$",
+        rf"\g<1>{status}\2",
+        content,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    content = re.sub(
+        r"^(priority:\s*)medium(\s*#.*)$",
+        rf"\g<1>{priority}\2",
+        content,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if effort:
+        content = re.sub(
+            r"^(effort:\s*)null(\s*#.*)$",
+            rf"\g<1>{effort}\2",
+            content,
+            count=1,
+            flags=re.MULTILINE,
+        )
+    if parent:
+        content = content.replace("parent: null", f"parent: {parent}", 1)
+    if serves:
+        content = content.replace("serves: []", "serves: [" + ", ".join(serves) + "]", 1)
+    if tags:
+        content = content.replace("tags: []", "tags: [" + ", ".join(tags) + "]", 1)
+    if requires_human:
+        content = content.replace("requires_human: false", "requires_human: true", 1)
+
+    if body:
+        # Split on the second --- to get frontmatter vs body
+        parts = content.split("---", 2)
+        if len(parts) >= 3:
+            content = parts[0] + "---" + parts[1] + "---\n" + body
+
+    return inject_provenance(content, origin, created_by)
+
+
+def create_ticket(
+    store: TicketStore,
+    ticket_type: str,
+    title: str,
+    *,
+    body: str | None = None,
+    parent: str | None = None,
+    priority: str | None = None,
+    effort: str | None = None,
+    tags=None,
+    requires_human: bool = False,
+    origin: str = "agent",
+    created_by: str | None = None,
+    serves=None,
+    triage: bool = False,
+    auto_approve=(),
+    today: str | None = None,
+    include_ticket: bool = False,
+) -> dict:
+    """File a new ticket -- ``llpm create`` and ``POST /{repo}/tickets``.
+
+    ``origin`` defaults to ``agent`` because that is the safe assumption for a
+    caller that didn't say: agent-origin tickets land ``draft`` unless their
+    type is on ``auto_approve``. Resolving provenance from the *environment*
+    (``LLPM_ORIGIN``, ``LLPM_CREATED_BY``, a git user) is deliberately CLI-only
+    -- over HTTP the caller must say who it is, so ``commands`` resolves it and
+    passes the answer in.
+
+    ``auto_approve`` is the board's ``[intake] auto_approve`` list (FEAT-011,
+    policy-as-data in ``.llpm/config.toml``). "Kind" for that policy is the
+    ticket ``type`` -- there is no separate kind taxonomy in the schema. The
+    list is a parameter rather than something read from the store because the
+    config lives in the repo checkout, which a server need not have; a caller
+    that passes nothing gets the conservative answer (agent -> draft).
+
+    Goal attachment is never enforced here: creation always succeeds whatever
+    ``serves``/``parent``/``triage`` say (ruling from Ben+fable 2026-08-01).
+    ``llpm orphans`` is the pull-based report that surfaces the gap.
+
+    Returns ``{"id", "type", "title", "status", "path"}`` -- plus ``"ticket"``
+    (the full serialized dict) when ``include_ticket`` is set, which the router
+    answers with and the CLI printer has no use for.
+    """
+    title = (title or "").strip()
+    if not title:
+        raise Invalid("Title is required.")
+
+    if origin not in parser.VALID_ORIGINS:
+        raise Invalid(
+            f"Invalid origin '{origin}'. Must be one of: "
+            f"{', '.join(sorted(parser.VALID_ORIGINS))}"
+        )
+    if priority is not None and priority not in parser.VALID_PRIORITIES:
+        raise Invalid(
+            f"Invalid priority '{priority}'. Must be one of: "
+            f"{', '.join(sorted(parser.VALID_PRIORITIES))}"
+        )
+    if effort is not None and effort not in parser.VALID_EFFORTS:
+        raise Invalid(
+            f"Invalid effort '{effort}'. Must be one of: "
+            f"{', '.join(sorted(parser.VALID_EFFORTS))}"
+        )
+
+    serve_list = _as_list(serves)
+    if serve_list and ticket_type not in parser.SERVES_TYPES:
+        raise Invalid(
+            f"'serves' is only valid on epics/features ('{ticket_type}' "
+            f"cannot carry it). Tasks serve goals via their parent."
+        )
+
+    tag_list = _as_list(tags)
+    if triage and "triage" not in tag_list:
+        tag_list.append("triage")
+
+    template_text = resolve_template(store, ticket_type)
+
+    if parent and not store.exists(parent):
+        raise Invalid(f"Parent ticket '{parent}' not found.")
+
+    # A body means someone already wrote the spec, so the ticket is workable;
+    # a bare template body is a placeholder, hence draft. The intake policy
+    # then overrides that for unapproved agent-origin kinds (FEAT-011).
+    status = "open" if body else "draft"
+    if origin == "agent" and ticket_type not in (auto_approve or ()):
+        status = "draft"
+
+    stamp = today or _today()
+
+    for _ in range(_MAX_CREATE_RETRIES):
+        ticket_id = parser.next_id(store, ticket_type)
+        filename = f"{ticket_id}_{_slugify(title)}.md"
+        content = _render_template(
+            template_text,
+            ticket_id=ticket_id,
+            title=title,
+            today=stamp,
+            status=status,
+            priority=priority or "medium",
+            effort=effort,
+            parent=parent,
+            serves=serve_list,
+            tags=tag_list,
+            requires_human=requires_human,
+            body=body,
+            origin=origin,
+            created_by=created_by,
+        )
+        try:
+            ref = store.create_exclusive(filename, content)
+        except FileExistsError:
+            continue  # another agent took this id between next_id and create
+
+        result = {
+            "id": ticket_id,
+            "type": ticket_type,
+            "title": title,
+            "status": status,
+            "path": str(ref),
+        }
+        if include_ticket:
+            # Serialize what we just wrote rather than reading it back: a
+            # brand-new ticket has no children, so the board load `ticket_dict`
+            # would otherwise pay for is pure waste.
+            fm, text = parser.parse_text(content, source=filename)
+            result["ticket"] = ticket_dict(store, ref, fm, body=text,
+                                           children_by_parent={})
+        return result
+
+    raise Conflict(
+        f"Could not create ticket after {_MAX_CREATE_RETRIES} retries (ID collision)."
+    )
+
+
+# -- set_fields (TASK-018) ---------------------------------------------------
+
+# Written by the system, never by a caller: identity, the dates llpm stamps,
+# and the FEAT-007 provenance keys.
+FORBIDDEN_FIELDS = frozenset({
+    "id", "type", "created", "updated", "completed",
+    "origin", "created_by", "commits", "managed_by",
+})
+
+# Settable, but only through the command that owns the rule. The hints name
+# CLI commands because that is llpm's own wording for the mistake; an HTTP
+# caller reads them as "this field has a dedicated endpoint".
+FIELD_REDIRECTS = {
+    "status": "Use 'llpm status'.",
+    "blockers": "Use 'llpm blocker'.",
+    "serves": "Use 'llpm serves'.",
+    "waits_on": "Use 'llpm waits'.",
+    "after": "Use 'llpm after'.",
+    "awaiting": "Use 'llpm status <id> review --awaiting <value>'.",
+}
+
+# `set` values arrive as strings from the CLI. Numeric-looking ones become
+# numbers (so `hours=9` stays numeric across edits) except in known text
+# fields -- and a leading zero ("007") is text, not a number.
+_TEXT_FIELDS = {"title", "parent", "branch", "origin_request", "milestone",
+                "batch", "resource"}
+_INT_RE = re.compile(r"^-?(?:0|[1-9]\d*)$")
+_FLOAT_RE = re.compile(r"^-?(?:0|[1-9]\d*)\.\d+$")
+
+
+def _coerce_number(field: str, value):
+    if not isinstance(value, str) or field in _TEXT_FIELDS:
+        return value
+    if _INT_RE.match(value):
+        return int(value)
+    if _FLOAT_RE.match(value):
+        return float(value)
+    return value
+
+
+def _is_null(value) -> bool:
+    """JSON ``null`` and the CLI's spelling of it ("null"/"none")."""
+    return value is None or (isinstance(value, str) and value.lower() in ("null", "none"))
+
+
+def _coerce_field(store: TicketStore, field: str, value):
+    """Validate and normalize one ``field=value`` assignment.
+
+    Handles both spellings of a value: the CLI's strings and JSON's own types
+    (a real bool for ``requires_human``, an array for ``tags``, a number for
+    ``hours``), so neither caller has to pre-convert.
+    """
+    if field == "priority" and value not in parser.VALID_PRIORITIES:
+        raise Invalid(
+            f"Invalid priority '{value}'. Must be one of: "
+            f"{', '.join(sorted(parser.VALID_PRIORITIES))}"
+        )
+
+    if field == "effort":
+        if _is_null(value):
+            return None
+        if value not in parser.VALID_EFFORTS:
+            raise Invalid(
+                f"Invalid effort '{value}'. Must be one of: "
+                f"{', '.join(sorted(parser.VALID_EFFORTS))}"
+            )
+
+    if field == "model_tier":
+        if _is_null(value):
+            return None
+        if value not in parser.VALID_MODEL_TIERS:
+            raise Invalid(
+                f"Invalid model_tier '{value}'. Must be one of: "
+                f"{', '.join(sorted(parser.VALID_MODEL_TIERS))}"
+            )
+
+    if field == "tags":
+        return _as_list(None if _is_null(value) else value)
+
+    if field == "requires_human":
+        if isinstance(value, bool):
+            return value
+        if _is_null(value):
+            return False
+        return str(value).lower() in ("true", "yes", "1")
+
+    if _is_null(value):
+        return None
+
+    value = _coerce_number(field, value)
+
+    if field == "parent" and not store.exists(str(value)):
+        raise Invalid(f"Parent ticket '{value}' not found.")
+
+    return value
+
+
+def set_fields(
+    store: TicketStore,
+    ticket_id: str,
+    fields: dict,
+    *,
+    today: str | None = None,
+    include_ticket: bool = False,
+) -> dict:
+    """Set simple frontmatter fields -- ``llpm set`` and ``PATCH …/{id}``.
+
+    Every field is validated before any is applied, so a request with one bad
+    value changes nothing. Fields that belong to another command are refused
+    rather than quietly redirected: ``status``, the four edge lists and
+    ``awaiting`` each have their own entry point, and the provenance keys are
+    the system's to write.
+
+    Returns ``{"id", "changes": [{"field", "value", "previous"}, …]}`` -- the
+    CLI prints one line per change -- plus ``"ticket"`` when asked.
+    """
+    if not fields:
+        raise Invalid("No fields to set.")
+
+    for field in fields:
+        if field in FORBIDDEN_FIELDS:
+            raise Invalid(f"Cannot set '{field}' -- managed automatically.")
+        if field in FIELD_REDIRECTS:
+            raise Invalid(f"Cannot set '{field}' via 'set'. {FIELD_REDIRECTS[field]}")
+
+    ref, fm, body = read_ticket(store, ticket_id)
+
+    changes = [
+        {"field": field, "value": _coerce_field(store, field, value),
+         "previous": fm.get(field)}
+        for field, value in fields.items()
+    ]
+
+    for change in changes:
+        fm[change["field"]] = change["value"]
+    fm["updated"] = today or _today()
+    write_ticket(store, ref, fm, body)
+
+    result = {"id": fm["id"], "changes": changes}
+    if include_ticket:
+        result["ticket"] = ticket_dict(store, ref, fm, body=body)
+    return result
+
+
+# -- Edges (TASK-019) --------------------------------------------------------
+#
+# Four pairs over one shape: read the ticket, validate the target, append to (or
+# drop from) one frontmatter list, write. Each returns
+# ``{"id", "target", "changed"}`` -- ``changed: False`` is an add that was
+# already there, which is a no-op and not an error -- plus whatever extra the
+# CLI needs to narrate it, plus ``"ticket"`` when the router asks.
+#
+# The vocabulary stays deliberately small: `blockers` (hard, intra-board IDs),
+# `waits_on` (cross-board vault stems), `after` (soft precedence, never blocks),
+# `serves` (epic/feature -> goal-note stems).
+
+
+def _edge_result(
+    store: TicketStore,
+    ref: Path,
+    fm: dict,
+    body: str,
+    target: str,
+    changed: bool,
+    include_ticket: bool,
+    **extra,
+) -> dict:
+    result = {"id": fm["id"], "target": target, "changed": changed, **extra}
+    if include_ticket:
+        result["ticket"] = ticket_dict(store, ref, fm, body=body)
+    return result
+
+
+def _write_edge(store: TicketStore, ref: Path, fm: dict, body: str, today: str | None) -> None:
+    fm["updated"] = today or _today()
+    write_ticket(store, ref, fm, body)
+
+
+def blocker_add(
+    store: TicketStore,
+    ticket_id: str,
+    blocker_id: str,
+    *,
+    today: str | None = None,
+    include_ticket: bool = False,
+) -> dict:
+    """Add a hard dependency. The blocker must be a real ticket on this board:
+    ``blockers`` never holds free text, because ``blocked`` is derived from
+    resolving each one."""
+    ref, fm, body = read_ticket(store, ticket_id)
+    upper = blocker_id.upper()
+
+    if upper == fm["id"].upper():
+        raise Invalid(f"Ticket {fm['id']} cannot block itself.")
+    if not store.exists(blocker_id):
+        raise Invalid(f"Ticket '{blocker_id}' not found.")
+
+    blockers = fm.get("blockers") or []
+    changed = not any(b.upper() == upper for b in blockers)
+    if changed:
+        fm["blockers"] = blockers + [upper]
+        _write_edge(store, ref, fm, body, today)
+
+    return _edge_result(store, ref, fm, body, upper, changed, include_ticket)
+
+
+def blocker_rm(
+    store: TicketStore,
+    ticket_id: str,
+    blocker_id: str,
+    *,
+    today: str | None = None,
+    include_ticket: bool = False,
+) -> dict:
+    ref, fm, body = read_ticket(store, ticket_id)
+    upper = blocker_id.upper()
+
+    blockers = fm.get("blockers") or []
+    if not any(b.upper() == upper for b in blockers):
+        raise NotFound(f"'{blocker_id}' is not a blocker on {fm['id']}.")
+
+    fm["blockers"] = [b for b in blockers if b.upper() != upper]
+    _write_edge(store, ref, fm, body, today)
+    return _edge_result(store, ref, fm, body, upper, True, include_ticket)
+
+
+def _after_reaches(store: TicketStore, start_id: str, target_id: str) -> bool:
+    """True if following ``after`` edges from start reaches target -- the
+    soft-cycle probe for ``after_add``."""
+    target = target_id.upper()
+    seen: set[str] = set()
+    frontier = [start_id.upper()]
+    while frontier:
+        current = frontier.pop()
+        if current == target:
+            return True
+        if current in seen:
+            continue
+        seen.add(current)
+        found = store.read(current)
+        if found is None:
+            continue
+        _, fm, _ = found
+        frontier.extend(a.upper() for a in fm.get("after") or [])
+    return False
+
+
+def after_add(
+    store: TicketStore,
+    ticket_id: str,
+    other_id: str,
+    *,
+    today: str | None = None,
+    include_ticket: bool = False,
+) -> dict:
+    """Add soft precedence -- advice to a scheduler, never a block.
+
+    Cycles are reported (``cycle_warning``), not refused: an edge that only
+    advises can't deadlock anything, and refusing would make ordering two
+    tickets depend on which one you touched first.
+    """
+    ref, fm, body = read_ticket(store, ticket_id)
+    upper = other_id.upper()
+
+    # Soft edge, but still a real ticket reference -- same rule as blockers.
+    # A self-edge is NOT refused the way a self-blocker is: it is a cycle, and
+    # cycles on this edge warn (see below). Only the hard edge can deadlock.
+    if not store.exists(other_id):
+        raise Invalid(f"Ticket '{other_id}' not found.")
+
+    after = fm.get("after") or []
+    changed = not any(a.upper() == upper for a in after)
+    cycle = False
+    if changed:
+        cycle = _after_reaches(store, other_id, fm["id"])
+        fm["after"] = after + [upper]
+        _write_edge(store, ref, fm, body, today)
+
+    return _edge_result(store, ref, fm, body, upper, changed, include_ticket,
+                        cycle_warning=cycle)
+
+
+def after_rm(
+    store: TicketStore,
+    ticket_id: str,
+    other_id: str,
+    *,
+    today: str | None = None,
+    include_ticket: bool = False,
+) -> dict:
+    ref, fm, body = read_ticket(store, ticket_id)
+    upper = other_id.upper()
+
+    after = fm.get("after") or []
+    if not any(a.upper() == upper for a in after):
+        raise NotFound(f"{fm['id']} is not ordered after '{other_id}'.")
+
+    fm["after"] = [a for a in after if a.upper() != upper]
+    _write_edge(store, ref, fm, body, today)
+    return _edge_result(store, ref, fm, body, upper, True, include_ticket)
+
+
+def waits_add(
+    store: TicketStore,
+    ticket_id: str,
+    stem: str,
+    *,
+    today: str | None = None,
+    include_ticket: bool = False,
+) -> dict:
+    """Add a cross-board dependency, addressed by full vault stem.
+
+    The target's state is probed *after* the write and reported
+    (``state``/``target_status``) as feedback, never as a gate: a stem that
+    doesn't resolve yet is exactly the case this edge exists for.
+    """
+    ref, fm, body = read_ticket(store, ticket_id)
+    target = stem.strip()
+
+    # Bare ticket IDs are intra-board dependencies -- that's what blockers are.
+    if parser.TICKET_ID_RE.match(target.upper()):
+        raise Invalid(
+            "'waits_on' holds full vault stems "
+            "(e.g. repos.marginalia.llpm.features.FEAT-010). "
+            "For same-board dependencies use 'llpm blocker'."
+        )
+
+    waits = fm.get("waits_on") or []
+    changed = target not in waits
+    state = target_status = None
+    if changed:
+        fm["waits_on"] = waits + [target]
+        _write_edge(store, ref, fm, body, today)
+        state, target_fm = parser._read_foreign(store, target)
+        target_status = target_fm.get("status") if target_fm else None
+
+    return _edge_result(store, ref, fm, body, target, changed, include_ticket,
+                        state=state, target_status=target_status)
+
+
+def waits_rm(
+    store: TicketStore,
+    ticket_id: str,
+    stem: str,
+    *,
+    today: str | None = None,
+    include_ticket: bool = False,
+) -> dict:
+    ref, fm, body = read_ticket(store, ticket_id)
+    target = stem.strip()
+
+    waits = fm.get("waits_on") or []
+    if target not in waits:
+        raise NotFound(f"{fm['id']} does not wait on '{target}'.")
+
+    fm["waits_on"] = [w for w in waits if w != target]
+    _write_edge(store, ref, fm, body, today)
+    return _edge_result(store, ref, fm, body, target, True, include_ticket)
+
+
+def serves_add(
+    store: TicketStore,
+    ticket_id: str,
+    goal_stem: str,
+    *,
+    today: str | None = None,
+    include_ticket: bool = False,
+) -> dict:
+    """Point an epic/feature at a goal note. Soft-validated: the stem is a
+    cross-repo vault address llpm can't always resolve, so only the shape is
+    checked (a ticket ID here is the common mistake)."""
+    ref, fm, body = read_ticket(store, ticket_id)
+    target = goal_stem.strip()
+
+    if fm.get("type") not in parser.SERVES_TYPES:
+        raise Invalid(
+            f"'serves' is only valid on epics/features "
+            f"({fm['id']} is a {fm.get('type')}). Tasks serve goals via their parent."
+        )
+    if parser.TICKET_ID_RE.match(target.upper()):
+        raise Invalid(
+            "'serves' holds full vault stems to goal notes "
+            "(e.g. goals.unified-agent-platform), not ticket IDs. "
+            "For ticket dependencies use 'llpm blocker'."
+        )
+
+    serves = fm.get("serves") or []
+    changed = target not in serves
+    if changed:
+        fm["serves"] = serves + [target]
+        _write_edge(store, ref, fm, body, today)
+
+    return _edge_result(store, ref, fm, body, target, changed, include_ticket)
+
+
+def serves_rm(
+    store: TicketStore,
+    ticket_id: str,
+    goal_stem: str,
+    *,
+    today: str | None = None,
+    include_ticket: bool = False,
+) -> dict:
+    ref, fm, body = read_ticket(store, ticket_id)
+    target = goal_stem.strip()
+
+    serves = fm.get("serves") or []
+    if target not in serves:
+        raise NotFound(f"{fm['id']} does not serve '{target}'.")
+
+    fm["serves"] = [s for s in serves if s != target]
+    _write_edge(store, ref, fm, body, today)
+    return _edge_result(store, ref, fm, body, target, True, include_ticket)

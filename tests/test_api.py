@@ -1,4 +1,5 @@
-"""Router tests for llpm's HTTP surface (TASK-016 reads, TASK-017 status).
+"""Router tests for llpm's HTTP surface (TASK-016 reads, TASK-017 status,
+TASK-018 create + PATCH, TASK-019 the edge pairs).
 
 The router is the thin half: these tests check wiring, query-param plumbing and
 error mapping. What the JSON *says* is the service's contract, pinned in
@@ -9,6 +10,8 @@ Skipped entirely without the optional ``llpm[api]`` extra installed.
 """
 
 from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -245,3 +248,262 @@ class TestStatusEndpoint:
         r = client.post("/demo/tickets/FEAT-002/status", json={"status": "review"})
         assert r.status_code == 409
         assert "changed underneath" in r.json()["detail"]
+
+
+class TestCreateEndpoint:
+    """TASK-018: `POST /{repo}/tickets`. The intake and provenance rules are
+    pinned in test_service.py; these are about the HTTP skin."""
+
+    BODY = {"type": "task", "title": "Filed over HTTP", "created_by": "claude/session-1"}
+
+    def test_201_with_the_ticket(self, client):
+        r = client.post("/demo/tickets", json=self.BODY)
+        assert r.status_code == 201
+        ticket = r.json()
+        assert ticket["id"] == "TASK-002"
+        assert ticket["title"] == "Filed over HTTP"
+        assert ticket["origin"] == "agent"
+        assert ticket["created_by"] == "claude/session-1"
+        assert ticket["managed_by"] == "llpm"
+
+    def test_answers_what_a_get_would_say(self, client):
+        posted = client.post("/demo/tickets", json=self.BODY).json()
+        assert posted == client.get(f"/demo/tickets/{posted['id']}").json()
+
+    def test_it_lands_on_the_board(self, client):
+        client.post("/demo/tickets", json=self.BODY)
+        assert "TASK-002" in ids(client.get("/demo/tickets").json())
+
+    def test_an_unsigned_create_is_422(self, client):
+        """`created_by` is required over HTTP: the server has no shell to infer
+        a caller from, so a ticket can't arrive anonymous."""
+        r = client.post("/demo/tickets", json={"type": "task", "title": "Anonymous"})
+        assert r.status_code == 422
+
+    def test_agent_origin_lands_draft(self, client):
+        assert client.post("/demo/tickets", json={**self.BODY, "body": "## Description\n\nGo.\n"}
+                           ).json()["status"] == "draft"
+
+    def test_human_origin_with_a_body_is_open(self, client):
+        r = client.post("/demo/tickets", json={**self.BODY, "origin": "human",
+                                               "body": "## Description\n\nGo.\n"})
+        assert r.json()["status"] == "open"
+
+    def test_optional_fields(self, client):
+        ticket = client.post("/demo/tickets", json={
+            **self.BODY, "priority": "high", "effort": "small", "parent": "FEAT-001",
+            "tags": ["auth", "security"], "requires_human": True,
+        }).json()
+        assert ticket["priority"] == "high"
+        assert ticket["effort"] == "small"
+        assert ticket["parent"] == "FEAT-001"
+        assert ticket["tags"] == ["auth", "security"]
+        assert ticket["requires_human"] is True
+
+    def test_serves_on_a_feature(self, client):
+        ticket = client.post("/demo/tickets", json={
+            "type": "feature", "title": "Goal-serving", "created_by": "claude/1",
+            "serves": ["goals.unified-agent-platform"],
+        }).json()
+        assert ticket["serves"] == ["goals.unified-agent-platform"]
+
+    def test_serves_on_a_task_is_422(self, client):
+        r = client.post("/demo/tickets", json={**self.BODY, "serves": ["goals.x"]})
+        assert r.status_code == 422
+        assert "only valid on epics/features" in r.json()["detail"]
+
+    def test_unknown_parent_is_422(self, client):
+        r = client.post("/demo/tickets", json={**self.BODY, "parent": "NOPE-999"})
+        assert r.status_code == 422
+        assert r.json()["detail"] == "Parent ticket 'NOPE-999' not found."
+
+    def test_bad_enum_is_422_with_llpms_message(self, client):
+        r = client.post("/demo/tickets", json={**self.BODY, "priority": "urgent"})
+        assert r.status_code == 422
+        assert "Invalid priority 'urgent'" in r.json()["detail"]
+
+    def test_unknown_type_is_422(self, client):
+        r = client.post("/demo/tickets", json={**self.BODY, "type": "banana"})
+        assert r.status_code == 422
+        assert r.json()["detail"] == "No template found for type 'banana'."
+
+    def test_unknown_board_is_404(self, client):
+        assert client.post("/nosuch/tickets", json=self.BODY).status_code == 404
+
+
+class TestConcurrentCreates:
+    """Atomic create is what lets parallel agents share one board: two requests
+    that race must never be handed the same ID."""
+
+    @pytest.fixture(params=["local", "vault"])
+    def app_for(self, request, docs_root):
+        store = LocalDirStore(docs_root) if request.param == "local" else load_fake_store(docs_root)
+        return api.make_app(lambda repo: store), store
+
+    def test_two_racing_posts_get_two_ids(self, app_for):
+        app, store = app_for
+        body = {"type": "task", "title": "Raced", "created_by": "claude/1"}
+
+        def post():
+            # A client per thread: TestClient's portal is not the thing under
+            # test, the store's exclusive create is.
+            return TestClient(app).post("/demo/tickets", json=body)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            responses = [f.result() for f in [pool.submit(post), pool.submit(post)]]
+
+        assert [r.status_code for r in responses] == [201, 201]
+        created = sorted(r.json()["id"] for r in responses)
+        assert created == ["TASK-002", "TASK-003"]
+        assert len(store.list_tickets(include_archive=False)) == 7
+
+
+class TestPatchEndpoint:
+    """TASK-018: `PATCH /{repo}/tickets/{id}` -- the body is the assignments."""
+
+    def test_sets_a_field(self, client):
+        ticket = client.patch("/demo/tickets/TASK-001", json={"priority": "high"}).json()
+        assert ticket["priority"] == "high"
+        assert client.get("/demo/tickets/TASK-001").json()["priority"] == "high"
+
+    def test_answers_what_a_get_would_say(self, client):
+        patched = client.patch("/demo/tickets/TASK-001", json={"priority": "high"}).json()
+        assert patched == client.get("/demo/tickets/TASK-001").json()
+
+    def test_several_fields_at_once(self, client):
+        ticket = client.patch("/demo/tickets/TASK-001",
+                              json={"priority": "low", "effort": "large"}).json()
+        assert (ticket["priority"], ticket["effort"]) == ("low", "large")
+
+    def test_json_types_are_taken_as_they_are(self, client):
+        ticket = client.patch("/demo/tickets/TASK-001", json={
+            "hours": 9, "tags": ["auth"], "requires_human": True, "effort": None,
+        }).json()
+        assert ticket["hours"] == 9
+        assert ticket["tags"] == ["auth"]
+        assert ticket["requires_human"] is True
+        assert ticket["effort"] is None
+
+    def test_a_field_with_its_own_endpoint_is_422(self, client):
+        r = client.patch("/demo/tickets/TASK-001", json={"status": "complete"})
+        assert r.status_code == 422
+        assert r.json()["detail"] == "Cannot set 'status' via 'set'. Use 'llpm status'."
+        assert client.get("/demo/tickets/TASK-001").json()["status"] == "open"
+
+    def test_a_system_written_field_is_422(self, client):
+        r = client.patch("/demo/tickets/TASK-001", json={"created_by": "someone else"})
+        assert r.status_code == 422
+        assert r.json()["detail"] == "Cannot set 'created_by' -- managed automatically."
+
+    def test_a_bad_enum_is_422(self, client):
+        r = client.patch("/demo/tickets/TASK-001", json={"priority": "urgent"})
+        assert r.status_code == 422
+        assert "Invalid priority 'urgent'" in r.json()["detail"]
+
+    def test_an_empty_patch_is_422(self, client):
+        assert client.patch("/demo/tickets/TASK-001", json={}).status_code == 422
+
+    def test_unknown_id_is_404(self, client):
+        r = client.patch("/demo/tickets/NOPE-999", json={"priority": "high"})
+        assert r.status_code == 404
+        assert r.json()["detail"] == "Ticket 'NOPE-999' not found."
+
+
+class TestBlockerEndpoints:
+    """TASK-019: one pair in full. The other three are the same handler shape
+    over the same service pattern, smoke-tested below."""
+
+    def test_add_answers_with_the_updated_ticket(self, client):
+        r = client.post("/demo/tickets/FEAT-002/blockers", json={"id": "TASK-001"})
+        assert r.status_code == 200
+        ticket = r.json()
+        assert ticket["blockers"] == [{"id": "TASK-001", "resolved": False}]
+
+    def test_the_effect_is_visible_at_once(self, client):
+        """A blocker changes a derived field, so answering with the ticket
+        saves the caller a follow-up GET."""
+        ticket = client.post("/demo/tickets/FEAT-002/blockers",
+                             json={"id": "TASK-001"}).json()
+        assert ticket["is_blocked"] is True
+        assert ticket["effective_status"] == "blocked"
+        assert ticket == client.get("/demo/tickets/FEAT-002").json()
+
+    def test_add_is_idempotent(self, client):
+        client.post("/demo/tickets/FEAT-002/blockers", json={"id": "TASK-001"})
+        r = client.post("/demo/tickets/FEAT-002/blockers", json={"id": "TASK-001"})
+        assert r.status_code == 200
+        assert r.json()["blockers"] == [{"id": "TASK-001", "resolved": False}]
+
+    def test_delete(self, client):
+        ticket = client.request("DELETE", "/demo/tickets/TASK-001/blockers",
+                                json={"id": "FEAT-002"}).json()
+        assert ticket["blockers"] == [{"id": "FEAT-001", "resolved": True}]
+        assert ticket["is_blocked"] is False
+
+    def test_delete_of_a_missing_edge_is_404(self, client):
+        r = client.request("DELETE", "/demo/tickets/TASK-001/blockers",
+                           json={"id": "EPIC-001"})
+        assert r.status_code == 404
+        assert r.json()["detail"] == "'EPIC-001' is not a blocker on TASK-001."
+
+    def test_unknown_blocker_is_422(self, client):
+        r = client.post("/demo/tickets/FEAT-002/blockers", json={"id": "NOPE-999"})
+        assert r.status_code == 422
+        assert r.json()["detail"] == "Ticket 'NOPE-999' not found."
+
+    def test_self_blocker_is_422(self, client):
+        r = client.post("/demo/tickets/FEAT-002/blockers", json={"id": "FEAT-002"})
+        assert r.status_code == 422
+        assert "cannot block itself" in r.json()["detail"]
+
+    def test_unknown_ticket_is_404(self, client):
+        r = client.post("/demo/tickets/NOPE-999/blockers", json={"id": "FEAT-002"})
+        assert r.status_code == 404
+
+    def test_a_missing_target_is_422(self, client):
+        assert client.post("/demo/tickets/FEAT-002/blockers", json={}).status_code == 422
+
+
+class TestOtherEdgeEndpoints:
+    """A smoke per remaining pair: add, see it on the ticket, remove it."""
+
+    def test_after(self, client):
+        ticket = client.post("/demo/tickets/FEAT-002/after", json={"id": "TASK-001"}).json()
+        assert ticket["after"] == ["TASK-001"]
+        assert ticket["is_blocked"] is False  # soft edge, never blocks
+        ticket = client.request("DELETE", "/demo/tickets/FEAT-002/after",
+                                json={"id": "TASK-001"}).json()
+        assert ticket["after"] == []
+
+    def test_waits(self, client):
+        stem = "repos.marginalia.llpm.features.FEAT-010"
+        ticket = client.post("/demo/tickets/FEAT-002/waits", json={"stem": stem}).json()
+        assert [w["stem"] for w in ticket["waits_on"]] == [stem]
+        ticket = client.request("DELETE", "/demo/tickets/FEAT-002/waits",
+                                json={"stem": stem}).json()
+        assert ticket["waits_on"] == []
+
+    def test_waits_refuses_a_ticket_id(self, client):
+        r = client.post("/demo/tickets/FEAT-002/waits", json={"stem": "FEAT-001"})
+        assert r.status_code == 422
+        assert "holds full vault stems" in r.json()["detail"]
+
+    def test_serves(self, client):
+        goal = "goals.unified-agent-platform"
+        ticket = client.post("/demo/tickets/FEAT-002/serves", json={"stem": goal}).json()
+        assert ticket["serves"] == [goal]
+        ticket = client.request("DELETE", "/demo/tickets/FEAT-002/serves",
+                                json={"stem": goal}).json()
+        assert ticket["serves"] == []
+
+    def test_serves_on_a_task_is_422(self, client):
+        r = client.post("/demo/tickets/TASK-001/serves", json={"stem": "goals.x"})
+        assert r.status_code == 422
+        assert "only valid on epics/features" in r.json()["detail"]
+
+    def test_delete_of_a_missing_edge_is_404(self, client):
+        for edge, body in (("after", {"id": "TASK-001"}),
+                           ("waits", {"stem": "repos.x.llpm.features.FEAT-001"}),
+                           ("serves", {"stem": "goals.nope"})):
+            r = client.request("DELETE", f"/demo/tickets/FEAT-002/{edge}", json=body)
+            assert r.status_code == 404, edge

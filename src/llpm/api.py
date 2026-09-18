@@ -16,10 +16,10 @@ Two entry points:
 maps a repo name to its ``TicketStore`` (and caches it -- building a store per
 request would throw away the vault connection).
 
-TASK-016 served the read side, TASK-017 the status write. The remaining write
-endpoints (create, PATCH, edges) land in the slices that follow and hang off the
-same ``_mapped()`` error mapping, which is the whole point of the typed service
-errors: ``NotFound`` -> 404, ``Invalid`` -> 422, ``Conflict`` -> 409.
+TASK-016 served the read side, TASK-017 the status write, TASK-018 create and
+PATCH, TASK-019 the four edge pairs -- the whole FEAT-015 surface. Every handler
+hangs off the same ``_mapped()`` error mapping, which is the point of the typed
+service errors: ``NotFound`` -> 404, ``Invalid`` -> 422, ``Conflict`` -> 409.
 """
 
 from __future__ import annotations
@@ -35,6 +35,47 @@ from .store import TicketStore
 
 StoreFor = Callable[[str], TicketStore]
 Boards = Callable[[], list[str]]
+
+
+class TicketCreate(BaseModel):
+    """Body of ``POST /{repo}/tickets``.
+
+    ``origin``/``created_by`` are deliberately explicit: the CLI infers them
+    from a shell (``LLPM_ORIGIN``, ``LLPM_CREATED_BY``, human-by-default), and
+    a server has no shell to infer from, so an HTTP caller says who it is.
+    ``created_by`` is required for that reason; ``origin`` defaults to the
+    conservative answer, which is what puts an unapproved kind in ``draft``.
+
+    Enums and every other rule are checked by ``service.create_ticket``, not
+    here, so a bad value produces llpm's own message rather than pydantic's.
+    """
+
+    type: str
+    title: str
+    body: str | None = None
+    parent: str | None = None
+    priority: str | None = None
+    effort: str | None = None
+    tags: list[str] | None = None
+    requires_human: bool = False
+    origin: str = "agent"
+    created_by: str
+    serves: list[str] | None = None
+    triage: bool = False
+
+
+class TicketRef(BaseModel):
+    """``{"id": "FEAT-002"}`` -- the body of the intra-board edge endpoints."""
+
+    id: str
+
+
+class StemRef(BaseModel):
+    """``{"stem": "repos.marginalia.llpm.features.FEAT-010"}`` -- the body of
+    the cross-board (``waits``) and goal (``serves``) edge endpoints, which
+    address vault notes rather than tickets on this board."""
+
+    stem: str
 
 
 class StatusChange(BaseModel):
@@ -124,6 +165,47 @@ def make_router(store_for: StoreFor, boards: Boards | None = None) -> APIRouter:
         with _mapped():
             return service.get_ticket(store_for(repo), ticket_id, body=body)
 
+    @router.post("/{repo}/tickets", status_code=201)
+    def post_ticket(repo: str, new: TicketCreate):
+        """File a ticket; answer 201 with it as ``GET`` would render it.
+
+        No ``[intake] auto_approve`` list is passed: that policy lives in the
+        board's ``.llpm/config.toml``, which is a repo checkout the server need
+        not have. So an agent-origin create over HTTP always lands ``draft`` --
+        the conservative half of FEAT-011 -- and a caller that wants it open
+        flips the status in a second call. Wiring the config through
+        ``store_for``'s deployment is the follow-up.
+        """
+        with _mapped():
+            result = service.create_ticket(
+                store_for(repo),
+                new.type,
+                new.title,
+                body=new.body,
+                parent=new.parent,
+                priority=new.priority,
+                effort=new.effort,
+                tags=new.tags,
+                requires_human=new.requires_human,
+                origin=new.origin,
+                created_by=new.created_by,
+                serves=new.serves,
+                triage=new.triage,
+                include_ticket=True,
+            )
+        return result["ticket"]
+
+    @router.patch("/{repo}/tickets/{ticket_id}")
+    def patch_ticket(repo: str, ticket_id: str, fields: dict):
+        """Set simple fields. The body is the assignments themselves --
+        ``{"priority": "high", "hours": 3}`` -- so the field names are llpm's
+        own, not a wrapper schema that would have to track them."""
+        with _mapped():
+            result = service.set_fields(
+                store_for(repo), ticket_id, fields, include_ticket=True
+            )
+        return result["ticket"]
+
     @router.post("/{repo}/tickets/{ticket_id}/status")
     def post_status(repo: str, ticket_id: str, change: StatusChange):
         """Change a status; answer with the ticket as ``GET`` would render it."""
@@ -137,6 +219,53 @@ def make_router(store_for: StoreFor, boards: Boards | None = None) -> APIRouter:
                 include_ticket=True,
             )
         return result["ticket"]
+
+    # -- Edges (TASK-019) ---------------------------------------------------
+    #
+    # Four pairs, one shape: POST adds, DELETE removes, both answer with the
+    # updated ticket so the caller sees the effect (a new blocker shows up as
+    # `is_blocked` at once) without a follow-up GET. Adds are idempotent -- an
+    # edge that was already there is 200, not an error -- while removing one
+    # that isn't there is a 404, because it names something that doesn't exist.
+    # The target travels in the body rather than the path: `waits`/`serves`
+    # stems are dotted vault addresses, and a body keeps all four pairs the
+    # same shape.
+
+    def _edge(fn, repo: str, ticket_id: str, target: str):
+        with _mapped():
+            return fn(store_for(repo), ticket_id, target, include_ticket=True)["ticket"]
+
+    @router.post("/{repo}/tickets/{ticket_id}/blockers")
+    def post_blocker(repo: str, ticket_id: str, target: TicketRef):
+        return _edge(service.blocker_add, repo, ticket_id, target.id)
+
+    @router.delete("/{repo}/tickets/{ticket_id}/blockers")
+    def delete_blocker(repo: str, ticket_id: str, target: TicketRef):
+        return _edge(service.blocker_rm, repo, ticket_id, target.id)
+
+    @router.post("/{repo}/tickets/{ticket_id}/after")
+    def post_after(repo: str, ticket_id: str, target: TicketRef):
+        return _edge(service.after_add, repo, ticket_id, target.id)
+
+    @router.delete("/{repo}/tickets/{ticket_id}/after")
+    def delete_after(repo: str, ticket_id: str, target: TicketRef):
+        return _edge(service.after_rm, repo, ticket_id, target.id)
+
+    @router.post("/{repo}/tickets/{ticket_id}/waits")
+    def post_waits(repo: str, ticket_id: str, target: StemRef):
+        return _edge(service.waits_add, repo, ticket_id, target.stem)
+
+    @router.delete("/{repo}/tickets/{ticket_id}/waits")
+    def delete_waits(repo: str, ticket_id: str, target: StemRef):
+        return _edge(service.waits_rm, repo, ticket_id, target.stem)
+
+    @router.post("/{repo}/tickets/{ticket_id}/serves")
+    def post_serves(repo: str, ticket_id: str, target: StemRef):
+        return _edge(service.serves_add, repo, ticket_id, target.stem)
+
+    @router.delete("/{repo}/tickets/{ticket_id}/serves")
+    def delete_serves(repo: str, ticket_id: str, target: StemRef):
+        return _edge(service.serves_rm, repo, ticket_id, target.stem)
 
     return router
 

@@ -23,8 +23,17 @@ from pathlib import Path
 import yaml
 
 from . import parser, service
-from .service import _as_hours, _merge_commits, _priority_key, _split_keys
+from .service import (
+    _as_hours,
+    _coerce_number,
+    _merge_commits,
+    _priority_key,
+    _slugify,
+    _split_keys,
+    _TEXT_FIELDS,
+)
 from .service import children_index as _children_index
+from .service import inject_provenance as _inject_provenance
 from .service import ticket_dict as _ticket_to_dict
 from .service import write_ticket as _write_ticket
 from .store import LocalDirStore, MdTreeStore, TicketStore
@@ -35,12 +44,6 @@ from .store import LocalDirStore, MdTreeStore, TicketStore
 def _today() -> str:
     """Return today's date as YYYY-MM-DD. Mockable in tests."""
     return date.today().isoformat()
-
-
-def _slugify(title: str) -> str:
-    """Convert title to UPPER_SNAKE_CASE for filenames."""
-    cleaned = re.sub(r"[^a-zA-Z0-9\s]", "", title)
-    return "_".join(cleaned.upper().split())
 
 
 def _read_body(args) -> str | None:
@@ -292,48 +295,6 @@ def _resolve_provenance(args) -> tuple[str, str | None]:
         )
         raise SystemExit(1)
     return origin, created_by
-
-
-def _inject_provenance(content: str, origin: str, created_by: str | None) -> str:
-    """Append provenance + ownership keys to rendered template frontmatter.
-
-    Textual insertion (not re-serialization) so template enum-hint comments
-    survive into the created ticket. Keys the template already carries are
-    left alone.
-    """
-    try:
-        fm, _ = parser.parse_text(content, source="<template>")
-    except (ValueError, yaml.YAMLError):
-        return content  # malformed template: let create fail/succeed as before
-
-    lines = []
-    if "managed_by" not in fm:
-        lines.append("managed_by: llpm")
-    if "origin" not in fm:
-        lines.append(f"origin: {origin}")
-    if created_by and "created_by" not in fm:
-        # created_by is caller input -- serialize the one line properly
-        lines.append(yaml.safe_dump({"created_by": created_by}, default_flow_style=False).strip())
-    if "commits" not in fm:
-        lines.append("commits: []")
-    if not lines:
-        return content
-
-    parts = content.split("---", 2)
-    fm_block = parts[1].rstrip("\n") + "\n" + "\n".join(lines) + "\n"
-    return "---" + fm_block + "---" + parts[2]
-
-
-def _intake_auto_approved(ticket_type: str, args) -> bool:
-    """True if `ticket_type` is on the project's intake auto-approve list
-    (FEAT-011 `[intake] auto_approve = [...]` in .llpm/config.toml).
-
-    "Kind" for this policy is the ticket `type` -- there's no separate kind
-    taxonomy in the schema, and type is the closest existing thing a project
-    could plausibly want to distinguish (e.g. auto-approving `research`
-    spikes while still drafting `feature` proposals)."""
-    auto_approve = _resolve_intake_config(args).get("auto_approve") or []
-    return ticket_type in auto_approve
 
 
 _REQUIRE_GOAL_MODES = {"off", "warn", "enforce"}
@@ -678,146 +639,39 @@ def cmd_show(args) -> None:
 
 
 def cmd_create(args) -> None:
+    """Resolve the environment, call, print. The rules live in
+    ``service.create_ticket``.
+
+    Provenance inference stays here: ``LLPM_ORIGIN`` / ``LLPM_CREATED_BY`` and
+    the human-by-default rule are about a *shell*, and so is the ``[intake]``
+    policy, which lives in the repo's ``.llpm/config.toml``. The service is
+    handed both answers rather than reaching for an environment a server
+    doesn't have.
+    """
     store, docs_root = _resolve_store_and_root(args)
-
-    ticket_type = args.ticket_type
-    title = args.title
-
-    # Read template: store-side first (vault override or local project copy),
-    # then fall back to bundled templates.
-    template_text = store.read_blob(f"templates/{ticket_type}.md")
-    if template_text is None:
-        # Bundled fallback — avoids requiring per-board template seeding for vault stores.
-        bundled_path = _templates_source() / f"{ticket_type}.md"
-        bundled_file = Path(str(bundled_path))
-        if bundled_file.exists():
-            template_text = bundled_file.read_text(encoding="utf-8")
-        else:
-            print(f"Error: No template found for type '{ticket_type}'.", file=sys.stderr)
-            raise SystemExit(1)
-
-    # Validate parent if specified
-    parent_id = getattr(args, "parent", None)
-    if parent_id:
-        if not store.exists(parent_id):
-            print(f"Error: Parent ticket '{parent_id}' not found.", file=sys.stderr)
-            raise SystemExit(1)
-
-    serves = getattr(args, "serves", None)
-    if serves and ticket_type not in parser.SERVES_TYPES:
-        print(
-            f"Error: 'serves' is only valid on epics/features ('{ticket_type}' "
-            f"cannot carry it). Tasks serve goals via their parent.",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-
-    # Read body
-    body = _read_body(args)
-    today = _today()
-
-    # Determine status
-    status = "open" if body else "draft"
-
-    # Provenance (FEAT-007) -- resolved once, up front: the intake policy
-    # below needs origin before status is finalized.
     origin, created_by = _resolve_provenance(args)
 
-    # Ticket-intake policy (FEAT-011): agent-proposed tickets land draft
-    # unless their kind is explicitly auto-approved. Human-authored tickets
-    # are unaffected. NOTE: goal attachment is deliberately NOT enforced
-    # here -- creation always succeeds regardless of --serves/--parent/
-    # --triage. Ruling from Ben+fable (2026-08-01) overrides the original
-    # spec: unattached agent tickets are a pull-based report concern
-    # (`llpm orphans` / `llpm goals`, gated by `[intake] require_goal`), not
-    # a creation-time gate -- goal-less boards must see zero friction.
-    triage = getattr(args, "triage", False)
-    if origin == "agent" and not _intake_auto_approved(ticket_type, args):
-        status = "draft"
-
-    # Atomic create with O_EXCL retry
-    max_retries = 3
-    for attempt in range(max_retries):
-        ticket_id = parser.next_id(store, ticket_type)
-        slug = _slugify(title)
-        filename = f"{ticket_id}_{slug}.md"
-
-        # String substitution on template
-        content = template_text
-        content = content.replace("__ID__", ticket_id)
-        content = content.replace("__TITLE__", title)
-        content = content.replace("__DATE__", today)
-
-        # Replace status in the template line (preserve comment)
-        content = re.sub(
-            r"^(status:\s*)draft(\s*#.*)$",
-            rf"\g<1>{status}\2",
-            content,
-            count=1,
-            flags=re.MULTILINE,
+    with _cli_errors():
+        result = service.create_ticket(
+            store,
+            args.ticket_type,
+            args.title,
+            body=_read_body(args),
+            parent=getattr(args, "parent", None),
+            priority=getattr(args, "priority", None),
+            effort=getattr(args, "effort", None),
+            tags=getattr(args, "tags", None),
+            requires_human=getattr(args, "requires_human", False),
+            origin=origin,
+            created_by=created_by,
+            serves=getattr(args, "serves", None),
+            triage=getattr(args, "triage", False),
+            auto_approve=_resolve_intake_config(args).get("auto_approve") or [],
+            today=_today(),
         )
 
-        # Handle optional fields via string substitution
-        priority = getattr(args, "priority", None) or "medium"
-        content = re.sub(
-            r"^(priority:\s*)medium(\s*#.*)$",
-            rf"\g<1>{priority}\2",
-            content,
-            count=1,
-            flags=re.MULTILINE,
-        )
-
-        effort = getattr(args, "effort", None)
-        if effort:
-            content = re.sub(
-                r"^(effort:\s*)null(\s*#.*)$",
-                rf"\g<1>{effort}\2",
-                content,
-                count=1,
-                flags=re.MULTILINE,
-            )
-
-        if parent_id:
-            content = content.replace("parent: null", f"parent: {parent_id}", 1)
-
-        if serves:
-            serve_list = [s.strip() for s in serves.split(",")]
-            serve_yaml = "[" + ", ".join(serve_list) + "]"
-            content = content.replace("serves: []", f"serves: {serve_yaml}", 1)
-
-        tags = getattr(args, "tags", None)
-        tag_list = [t.strip() for t in tags.split(",")] if tags else []
-        if triage and "triage" not in tag_list:
-            tag_list.append("triage")
-        if tag_list:
-            tag_yaml = "[" + ", ".join(tag_list) + "]"
-            content = content.replace("tags: []", f"tags: {tag_yaml}", 1)
-
-        requires_human = getattr(args, "requires_human", False)
-        if requires_human:
-            content = content.replace("requires_human: false", "requires_human: true", 1)
-
-        # Replace body if provided
-        if body:
-            # Split on second --- to get frontmatter vs body
-            parts = content.split("---", 2)
-            if len(parts) >= 3:
-                content = parts[0] + "---" + parts[1] + "---\n" + body
-
-        # Provenance + ownership (FEAT-007)
-        content = _inject_provenance(content, origin, created_by)
-
-        # Atomic file creation
-        try:
-            filepath = store.create_exclusive(filename, content)
-            print(f"Created {ticket_id}: {title}")
-            print(f"File: {filepath}")
-            return
-        except FileExistsError:
-            continue
-
-    print(f"Error: Could not create ticket after {max_retries} retries (ID collision).", file=sys.stderr)
-    raise SystemExit(1)
+    print(f"Created {result['id']}: {result['title']}")
+    print(f"File: {result['path']}")
 
 
 def cmd_status(args) -> None:
@@ -850,239 +704,114 @@ def cmd_status(args) -> None:
         print(f"Captured {result['commits_captured']} commit(s) -> commits[]")
 
 
-# `set` values arrive as strings. Numeric-looking ones become numbers (so
-# `hours=9` stays numeric across CLI edits) except in known text fields —
-# and a leading zero ("007") is text, not a number.
-_TEXT_FIELDS = {"title", "parent", "branch", "origin_request", "milestone",
-                "batch", "resource"}
-_INT_RE = re.compile(r"^-?(?:0|[1-9]\d*)$")
-_FLOAT_RE = re.compile(r"^-?(?:0|[1-9]\d*)\.\d+$")
-
-
-def _coerce_number(field: str, value):
-    if not isinstance(value, str) or field in _TEXT_FIELDS:
-        return value
-    if _INT_RE.match(value):
-        return int(value)
-    if _FLOAT_RE.match(value):
-        return float(value)
-    return value
-
-
 def cmd_set(args) -> None:
+    """Parse ``field=value`` argv, call, print one line per change.
+
+    Splitting the assignments is genuinely argv's business; every rule about
+    what a field may hold -- the enums, the null spellings, numeric coercion,
+    the refusals -- lives in ``service.set_fields``, which an HTTP PATCH hits
+    with the same values already typed.
+    """
     store, docs_root = _resolve_store_and_root(args)
 
-    path, fm, body = _require_ticket(store, args.ticket_id)
-
-    # Restricted fields (provenance is written by the system, never by set)
-    FORBIDDEN = {"id", "type", "created", "updated", "completed",
-                 "origin", "created_by", "commits", "managed_by"}
-    REDIRECT = {
-        "status": "Use 'llpm status'.",
-        "blockers": "Use 'llpm blocker'.",
-        "serves": "Use 'llpm serves'.",
-        "waits_on": "Use 'llpm waits'.",
-        "after": "Use 'llpm after'.",
-        "awaiting": "Use 'llpm status <id> review --awaiting <value>'.",
-    }
-
-    # Parse field=value pairs
-    assignments = args.assignments
-    changes = []
-
-    for assignment in assignments:
-        if "=" in assignment:
-            field, value = assignment.split("=", 1)
-        else:
+    fields = {}
+    for assignment in args.assignments:
+        if "=" not in assignment:
             # Legacy single-field syntax: llpm set ID field value
-            # Only works if exactly 2 args remain
             print(f"Error: Use field=value syntax (e.g., 'priority=high').", file=sys.stderr)
             raise SystemExit(1)
+        field, value = assignment.split("=", 1)
+        fields[field.strip()] = value.strip()
 
-        field = field.strip()
-        value = value.strip()
+    with _cli_errors():
+        result = service.set_fields(store, args.ticket_id, fields, today=_today())
 
-        if field in FORBIDDEN:
-            print(f"Error: Cannot set '{field}' -- managed automatically.", file=sys.stderr)
-            raise SystemExit(1)
-
-        if field in REDIRECT:
-            print(f"Error: Cannot set '{field}' via 'set'. {REDIRECT[field]}", file=sys.stderr)
-            raise SystemExit(1)
-
-        # Validate enums
-        if field == "priority" and value not in parser.VALID_PRIORITIES:
-            print(f"Error: Invalid priority '{value}'. Must be one of: {', '.join(sorted(parser.VALID_PRIORITIES))}", file=sys.stderr)
-            raise SystemExit(1)
-
-        if field == "effort":
-            if value.lower() in ("null", "none"):
-                value = None
-            elif value not in parser.VALID_EFFORTS:
-                print(f"Error: Invalid effort '{value}'. Must be one of: {', '.join(sorted(parser.VALID_EFFORTS))}", file=sys.stderr)
-                raise SystemExit(1)
-
-        if field == "model_tier":
-            if value.lower() in ("null", "none"):
-                value = None
-            elif value not in parser.VALID_MODEL_TIERS:
-                print(f"Error: Invalid model_tier '{value}'. Must be one of: {', '.join(sorted(parser.VALID_MODEL_TIERS))}", file=sys.stderr)
-                raise SystemExit(1)
-
-        # Handle null/none
-        if isinstance(value, str) and value.lower() in ("null", "none"):
-            value = None
-
-        # Handle list fields
-        if field == "tags":
-            value = [t.strip() for t in value.split(",")] if value else []
-
-        # Handle requires_human
-        if field == "requires_human":
-            value = value.lower() in ("true", "yes", "1")
-
-        value = _coerce_number(field, value)
-
-        # Validate parent exists
-        if field == "parent" and value is not None:
-            if not store.exists(value):
-                print(f"Error: Parent ticket '{value}' not found.", file=sys.stderr)
-                raise SystemExit(1)
-
-        changes.append((field, value))
-
-    # All validations passed -- apply changes
-    for field, value in changes:
-        old = fm.get(field)
-        fm[field] = value
-        print(f"{fm['id']}: {field} = {value} (was {old})")
-
-    fm["updated"] = _today()
-    _write_ticket(store, path, fm, body)
-
-
-def _require_serves_capable(fm: dict) -> None:
-    """Exit with an error unless the ticket type can carry `serves:`."""
-    if fm.get("type") not in parser.SERVES_TYPES:
-        print(
-            f"Error: 'serves' is only valid on epics/features "
-            f"({fm['id']} is a {fm.get('type')}). Tasks serve goals via their parent.",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
+    for change in result["changes"]:
+        print(f"{result['id']}: {change['field']} = {change['value']} "
+              f"(was {change['previous']})")
 
 
 def cmd_serves_add(args) -> None:
     store, docs_root = _resolve_store_and_root(args)
-
-    path, fm, body = _require_ticket(store, args.ticket_id)
-    _require_serves_capable(fm)
-
     goal_stem = args.goal_stem.strip()
-    # Catch the common mistake of passing a ticket ID instead of a vault stem.
-    # Existence validation stays soft until type-keyed schema matching lands.
-    if parser.TICKET_ID_RE.match(goal_stem.upper()):
-        print(
-            f"Error: 'serves' holds full vault stems to goal notes "
-            f"(e.g. goals.unified-agent-platform), not ticket IDs. "
-            f"For ticket dependencies use 'llpm blocker'.",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
 
-    serves = fm.get("serves") or []
-    if goal_stem in serves:
-        print(f"{fm['id']}: already serves '{goal_stem}'.")
+    with _cli_errors():
+        result = service.serves_add(store, args.ticket_id, goal_stem, today=_today())
+
+    if not result["changed"]:
+        print(f"{result['id']}: already serves '{goal_stem}'.")
         return
-
-    serves.append(goal_stem)
-    fm["serves"] = serves
-    fm["updated"] = _today()
-    _write_ticket(store, path, fm, body)
-    print(f"{fm['id']}: now serves '{goal_stem}'")
+    print(f"{result['id']}: now serves '{goal_stem}'")
 
 
 def cmd_serves_rm(args) -> None:
     store, docs_root = _resolve_store_and_root(args)
-
-    path, fm, body = _require_ticket(store, args.ticket_id)
-
     goal_stem = args.goal_stem.strip()
-    serves = fm.get("serves") or []
-    if goal_stem not in serves:
-        print(f"Error: {fm['id']} does not serve '{goal_stem}'.", file=sys.stderr)
-        raise SystemExit(1)
 
-    fm["serves"] = [s for s in serves if s != goal_stem]
-    fm["updated"] = _today()
-    _write_ticket(store, path, fm, body)
-    print(f"{fm['id']}: no longer serves '{goal_stem}'")
+    with _cli_errors():
+        result = service.serves_rm(store, args.ticket_id, goal_stem, today=_today())
 
-
-def _after_reaches(store: TicketStore, start_id: str, target_id: str) -> bool:
-    """True if following `after` edges from start reaches target -- the
-    soft-cycle probe for 'llpm after add'."""
-    target = target_id.upper()
-    seen: set[str] = set()
-    frontier = [start_id.upper()]
-    while frontier:
-        current = frontier.pop()
-        if current == target:
-            return True
-        if current in seen:
-            continue
-        seen.add(current)
-        found = store.read(current)
-        if found is None:
-            continue
-        _, fm, _ = found
-        frontier.extend(a.upper() for a in fm.get("after") or [])
-    return False
+    print(f"{result['id']}: no longer serves '{goal_stem}'")
 
 
 def cmd_after_add(args) -> None:
     store, docs_root = _resolve_store_and_root(args)
-
-    path, fm, body = _require_ticket(store, args.ticket_id)
     other_id = args.after
 
-    # Soft edge, but still a real ticket reference -- same rule as blockers.
-    if not store.exists(other_id):
-        print(f"Error: Ticket '{other_id}' not found.", file=sys.stderr)
-        raise SystemExit(1)
+    with _cli_errors():
+        result = service.after_add(store, args.ticket_id, other_id, today=_today())
 
-    after = fm.get("after") or []
-    if any(a.upper() == other_id.upper() for a in after):
-        print(f"{fm['id']}: already ordered after '{other_id}'.")
+    if not result["changed"]:
+        print(f"{result['id']}: already ordered after '{other_id}'.")
         return
-
     # Soft cycles warn, never error: the edge is advice, not a constraint.
-    if _after_reaches(store, other_id, fm["id"]):
-        print(f"Warning: soft ordering cycle -- '{other_id}' already comes after {fm['id']}. Edge added anyway.")
-
-    after.append(other_id.upper())
-    fm["after"] = after
-    fm["updated"] = _today()
-    _write_ticket(store, path, fm, body)
-    print(f"{fm['id']}: now ordered after '{other_id}' (soft -- never blocks)")
+    if result["cycle_warning"]:
+        print(f"Warning: soft ordering cycle -- '{other_id}' already comes after "
+              f"{result['id']}. Edge added anyway.")
+    print(f"{result['id']}: now ordered after '{other_id}' (soft -- never blocks)")
 
 
 def cmd_after_rm(args) -> None:
     store, docs_root = _resolve_store_and_root(args)
-
-    path, fm, body = _require_ticket(store, args.ticket_id)
     other_id = args.after
 
-    after = fm.get("after") or []
-    upper_id = other_id.upper()
-    if not any(a.upper() == upper_id for a in after):
-        print(f"Error: {fm['id']} is not ordered after '{other_id}'.", file=sys.stderr)
-        raise SystemExit(1)
+    with _cli_errors():
+        result = service.after_rm(store, args.ticket_id, other_id, today=_today())
 
-    fm["after"] = [a for a in after if a.upper() != upper_id]
-    fm["updated"] = _today()
-    _write_ticket(store, path, fm, body)
-    print(f"{fm['id']}: no longer ordered after '{other_id}'")
+    print(f"{result['id']}: no longer ordered after '{other_id}'")
+
+
+def cmd_waits_add(args) -> None:
+    store, docs_root = _resolve_store_and_root(args)
+    target = args.on.strip()
+
+    with _cli_errors():
+        result = service.waits_add(store, args.ticket_id, target, today=_today())
+
+    if not result["changed"]:
+        print(f"{result['id']}: already waits on '{target}'.")
+        return
+
+    # Best-effort feedback on the target's current state; never fails the add.
+    if result["state"] == "ok":
+        print(f"{result['id']}: now waits on '{target}' "
+              f"(currently: {result['target_status']})")
+    elif result["state"] == "missing":
+        print(f"{result['id']}: now waits on '{target}'")
+        print(f"Warning: '{target}' not found in the vault -- blocking until it exists.")
+    else:
+        print(f"{result['id']}: now waits on '{target}' "
+              f"(target status unknown from this store)")
+
+
+def cmd_waits_rm(args) -> None:
+    store, docs_root = _resolve_store_and_root(args)
+    target = args.on.strip()
+
+    with _cli_errors():
+        result = service.waits_rm(store, args.ticket_id, target, today=_today())
+
+    print(f"{result['id']}: no longer waits on '{target}'")
 
 
 # Display tag for each waits_on resolution state ('ok' depends on resolved)
@@ -1193,47 +922,25 @@ def cmd_waits_list(args) -> None:
 
 def cmd_blocker_add(args) -> None:
     store, docs_root = _resolve_store_and_root(args)
-
-    path, fm, body = _require_ticket(store, args.ticket_id)
     blocker_id = args.blocked_by
 
-    # Validate blocker exists
-    if not store.exists(blocker_id):
-        print(f"Error: Ticket '{blocker_id}' not found.", file=sys.stderr)
-        raise SystemExit(1)
+    with _cli_errors():
+        result = service.blocker_add(store, args.ticket_id, blocker_id, today=_today())
 
-    blockers = fm.get("blockers") or []
-
-    # Check for duplicate (case-insensitive)
-    if any(b.upper() == blocker_id.upper() for b in blockers):
-        print(f"{fm['id']}: already blocked by '{blocker_id}'.")
+    if not result["changed"]:
+        print(f"{result['id']}: already blocked by '{blocker_id}'.")
         return
-
-    blockers.append(blocker_id.upper())
-    fm["blockers"] = blockers
-    fm["updated"] = _today()
-    _write_ticket(store, path, fm, body)
-    print(f"{fm['id']}: now blocked by '{blocker_id}'")
+    print(f"{result['id']}: now blocked by '{blocker_id}'")
 
 
 def cmd_blocker_rm(args) -> None:
     store, docs_root = _resolve_store_and_root(args)
-
-    path, fm, body = _require_ticket(store, args.ticket_id)
     blocker_id = args.blocked_by
 
-    blockers = fm.get("blockers") or []
-    upper_id = blocker_id.upper()
+    with _cli_errors():
+        result = service.blocker_rm(store, args.ticket_id, blocker_id, today=_today())
 
-    matching = [b for b in blockers if b.upper() == upper_id]
-    if not matching:
-        print(f"Error: '{blocker_id}' is not a blocker on {fm['id']}.", file=sys.stderr)
-        raise SystemExit(1)
-
-    fm["blockers"] = [b for b in blockers if b.upper() != upper_id]
-    fm["updated"] = _today()
-    _write_ticket(store, path, fm, body)
-    print(f"{fm['id']}: removed blocker '{blocker_id}'")
+    print(f"{result['id']}: removed blocker '{blocker_id}'")
 
 
 def cmd_blocker_list(args) -> None:
