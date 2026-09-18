@@ -636,6 +636,52 @@ class TestCommitCapture:
         fm, _ = parser.parse_document(docs_root / "tickets" / "TASK-001_ADD_PYYAML.md")
         assert fm["commits"] == [sha]
 
+    def test_harvest_matches_subject_not_body(self, tmp_path, monkeypatch):
+        import subprocess
+        repo = tmp_path / "workrepo-subject"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+
+        def commit(message):
+            subprocess.run(
+                ["git", "-c", "user.email=t@t", "-c", "user.name=T",
+                 "commit", "--allow-empty", "-q", "-m", message],
+                cwd=repo, check=True,
+            )
+            return subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+
+        # Four subject shapes that must all be harvested, oldest first.
+        sha_prefix = commit("feat(TASK-001): a")
+        sha_colon = commit("TASK-001: b")
+        sha_paren = commit("fix x (TASK-001)")
+        sha_bare = commit("TASK-001 x")
+        # Mentioned only in the body -- --grep's prefilter matches it, but
+        # the subject-only post-filter must not.
+        commit("unrelated change\n\nSee also TASK-001 for context.")
+        # Neighbouring IDs that share the TASK-001 prefix must not match.
+        commit("TASK-0010 unrelated")
+        commit("TASK-0011 unrelated")
+
+        monkeypatch.chdir(repo)
+        shas = _REAL_HARVEST("TASK-001")
+        assert shas == [sha_prefix, sha_colon, sha_paren, sha_bare]
+
+    def test_harvest_no_match_on_neighbouring_shorter_id(self, tmp_path, monkeypatch):
+        import subprocess
+        repo = tmp_path / "workrepo-neighbour"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=T",
+             "commit", "--allow-empty", "-q", "-m", "TASK-010 change"],
+            cwd=repo, check=True,
+        )
+        monkeypatch.chdir(repo)
+        # TASK-01 is a prefix of TASK-010's digits, not a whole-token match.
+        assert _REAL_HARVEST("TASK-01") == []
+
     @patch.object(commands, "_today", return_value="2026-03-20")
     def test_show_displays_commits(self, mock_today, docs_root, capsys):
         run_cli("status", "FEAT-002", "review", "--commit", "c" * 40, docs_root=docs_root)

@@ -363,15 +363,19 @@ def _resolve_require_goal(args) -> str:
 
 
 def _harvest_commits(ticket_id: str) -> list[str]:
-    """Full SHAs of commits in the CWD repo that mention the ticket ID,
-    oldest first. Best-effort: no git, no repo, or a timeout -> [].
+    """Full SHAs of commits in the CWD repo whose subject line mentions the
+    ticket ID as a whole token, oldest first. Best-effort: no git, no repo,
+    or a timeout -> [].
 
-    This formalizes the ticket-IDs-in-commit-messages convention: the soft
-    links become durable ``commits:`` entries at review/complete time.
+    This formalizes the ticket-IDs-in-commit-subjects convention: the soft
+    links become durable ``commits:`` entries at review/complete time. Body
+    mentions don't count -- a commit that mentions this ID only in its body
+    (e.g. because it references a related ticket) is not captured; that's
+    what explicit --commit is for.
     """
     try:
         result = subprocess.run(
-            ["git", "log", "--all", "--format=%H", f"--grep={ticket_id}"],
+            ["git", "log", "--all", "--format=%H%x1f%s", f"--grep={ticket_id}"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -380,7 +384,15 @@ def _harvest_commits(ticket_id: str) -> list[str]:
         return []
     if result.returncode != 0:
         return []
-    shas = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    pattern = re.compile(rf"(?<![A-Za-z0-9-]){re.escape(ticket_id)}(?![0-9])")
+    shas = []
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line or "\x1f" not in line:
+            continue
+        sha, subject = line.split("\x1f", 1)
+        if pattern.search(subject):
+            shas.append(sha)
     return shas[::-1]
 
 
