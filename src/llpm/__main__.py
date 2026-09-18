@@ -427,6 +427,27 @@ def _build_parser():
     p_project.add_argument("--json", action="store_true", help="Output as JSON object")
 
     # -- help --
+    # -- serve --
+    p_serve = subparsers.add_parser(
+        "serve",
+        description=(
+            "Serve the board over HTTP so agents and services can read and change "
+            "tickets without a checkout. Without --vault it serves the single board "
+            "the usual config discovery finds, under its own name (a vault store's "
+            "repo stem, or the directory holding a local docs root): "
+            "GET /<board>/tickets, GET /<board>/tickets/<ID>, GET /boards, /healthz. "
+            "With --vault it serves every repos.*.llpm board in that vault from one "
+            "process. Needs the optional API extra: pip install 'llpm[api]'."
+        ),
+        help="Serve the board(s) over HTTP (needs the llpm[api] extra)",
+    )
+    p_serve.add_argument("--host", default=commands.SERVE_DEFAULT_HOST,
+                         help=f"Bind address (default: {commands.SERVE_DEFAULT_HOST})")
+    p_serve.add_argument("--port", type=int, default=commands.SERVE_DEFAULT_PORT,
+                         help=f"Port (default: {commands.SERVE_DEFAULT_PORT})")
+    p_serve.add_argument("--vault", default=None,
+                         help="Vault base URL; serve every repos.*.llpm board it holds")
+
     p_help = subparsers.add_parser(
         "help",
         description="Show help for all commands.",
@@ -474,6 +495,7 @@ def _run(args, parser, subparsers) -> None:
         "goals": commands.cmd_goals,
         "orphans": commands.cmd_orphans,
         "project": commands.cmd_project,
+        "serve": commands.cmd_serve,
         "skills": commands.cmd_skills,
         "todo": commands.cmd_todo,
     }

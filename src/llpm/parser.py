@@ -14,6 +14,9 @@ import yaml
 
 VALID_STATUSES = {"draft", "planned", "open", "in-progress", "review", "complete", "closed", "deferred"}
 RESOLVED_STATUSES = {"complete", "closed"}
+# Statuses that blockers can no longer override: a complete/closed/deferred
+# ticket keeps its stored status however its blockers resolve.
+TERMINAL_STATUSES = {"complete", "closed", "deferred"}
 VALID_PRIORITIES = {"low", "medium", "high"}
 VALID_EFFORTS = {"trivial", "small", "medium", "large", "xlarge"}
 VALID_MODEL_TIERS = {"heavy", "standard", "light"}
@@ -350,7 +353,7 @@ def effective_status(docs_root: Path, frontmatter: dict) -> str:
     """
     stored = frontmatter.get("status", "draft")
     # Don't override terminal/deferred states
-    if stored in ("complete", "closed", "deferred"):
+    if stored in TERMINAL_STATUSES:
         return stored
     if is_blocked(docs_root, frontmatter):
         return "blocked"

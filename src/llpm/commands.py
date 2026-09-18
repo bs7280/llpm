@@ -1,4 +1,10 @@
-"""Command implementations for LLPM CLI."""
+"""Command implementations for LLPM CLI.
+
+Commands are printers: they resolve a store from the environment, call
+``service.py`` for anything that touches ticket data, and render the result in
+llpm's terminal idiom. Rules, validation and the JSON shape live in the service
+so the CLI and the HTTP API (``api.py``) can't drift apart.
+"""
 
 from __future__ import annotations
 
@@ -9,13 +15,17 @@ import shutil
 import subprocess
 import sys
 import tomllib
+from contextlib import contextmanager
 from datetime import date
 from importlib import resources as importlib_resources
 from pathlib import Path
 
 import yaml
 
-from . import parser
+from . import parser, service
+from .service import _as_hours, _priority_key, _split_keys
+from .service import children_index as _children_index
+from .service import ticket_dict as _ticket_to_dict
 from .store import LocalDirStore, MdTreeStore, TicketStore
 
 
@@ -409,131 +419,30 @@ def _merge_commits(existing: list[str], new_shas: list[str]) -> list[str]:
     return merged
 
 
+@contextmanager
+def _cli_errors():
+    """Render any service error the CLI way: one ``Error: …`` line, exit 1.
+
+    The service raises typed errors carrying llpm's existing message text, so a
+    command that becomes a service caller keeps printing exactly what it printed
+    before -- and the API renders the same errors as status codes.
+    """
+    try:
+        yield
+    except service.ServiceError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        raise SystemExit(1) from e
+
+
 def _require_ticket(store: TicketStore, ticket_id: str) -> tuple[Path, dict, str]:
     """Find and parse a ticket, or exit with error."""
-    result = store.read(ticket_id)
-    if result is None:
-        print(f"Error: Ticket '{ticket_id}' not found.", file=sys.stderr)
-        raise SystemExit(1)
-    return result
-
-
-# Plan-structure fields (contract: vault stem
-# repos.coaching_platfrom_saas.llpm.milestones) are free-form frontmatter, so
-# the JSON shape normalizes them the way the marginalia board does: `resource`
-# is stored comma-separated (set only splits tags) and `hours` may predate
-# numeric coercion in `set`.
-def _split_keys(value) -> list[str]:
-    if value is None:
-        return []
-    parts = value if isinstance(value, list) else str(value).split(",")
-    return [s for s in (str(p).strip() for p in parts) if s]
-
-
-def _as_hours(value) -> float | None:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _children_index(tickets) -> dict[str, list[str]]:
-    """parent id -> child ids, built once from an already-loaded ticket list.
-
-    TASK-012: ``get_children`` reloads the whole board per call, which made every
-    JSON listing O(n^2) in vault requests (153 tickets ~ 24k requests, ~16 min).
-    Archived tickets are excluded, matching ``get_children(include_archive=False)``.
-    """
-    index: dict[str, list[str]] = {}
-    for path, fm, *_ in tickets:
-        parent = fm.get("parent")
-        if parent and "archive" not in path.parts:
-            index.setdefault(str(parent).upper(), []).append(fm.get("id"))
-    return index
-
-
-def _ticket_to_dict(
-    store: TicketStore,
-    path: Path,
-    fm: dict,
-    body: str | None = None,
-    children_by_parent: dict[str, list[str]] | None = None,
-) -> dict:
-    """Serialize a ticket to the JSON output schema.
-
-    If body is None, it is omitted (list mode). If provided, it is included (show mode).
-    ``children_by_parent`` (from ``_children_index``) lets listings resolve children
-    without reloading the board per ticket; ``show`` passes nothing and pays one load.
-    """
-    eff_status = parser.effective_status(store, fm)
-    is_blocked = eff_status == "blocked"
-
-    if children_by_parent is not None:
-        child_ids = list(children_by_parent.get(str(fm["id"]).upper(), []))
-    else:
-        child_ids = [c["id"] for c in parser.get_children(store, fm["id"])]
-
-    blocker_details = parser.get_blocker_details(store, fm) if fm.get("blockers") else []
-
-    archived = "archive" in path.parts
-
-    result = {
-        "id": fm["id"],
-        "type": fm["type"],
-        "title": fm["title"],
-        "status": fm["status"],
-        "effective_status": eff_status,
-        "is_blocked": is_blocked,
-        "awaiting": fm.get("awaiting"),
-        "priority": fm["priority"],
-        "effort": fm.get("effort"),
-        "model_tier": fm.get("model_tier"),
-        "parent": fm.get("parent"),
-        "children": child_ids,
-        "blockers": [
-            {"id": d["id"], "resolved": d["resolved"]}
-            for d in blocker_details
-        ],
-        "serves": fm.get("serves") or [],
-        "waits_on": parser.get_waits_on_details(store, fm),
-        "after": fm.get("after") or [],
-        "tags": fm.get("tags") or [],
-        "requires_human": fm.get("requires_human", False),
-        "milestone": fm.get("milestone"),
-        "batch": fm.get("batch"),
-        "resource": _split_keys(fm.get("resource")),
-        "hours": _as_hours(fm.get("hours")),
-        "origin": fm.get("origin"),
-        "created_by": fm.get("created_by"),
-        "commits": fm.get("commits") or [],
-        "managed_by": fm.get("managed_by"),
-        "created": fm.get("created"),
-        "updated": fm.get("updated"),
-        "completed": fm.get("completed"),
-        "archived": archived,
-        "path": str(path),
-    }
-
-    if body is not None:
-        result["body"] = body
-        result["body_html"] = None
-
-    return result
+    with _cli_errors():
+        return service.read_ticket(store, ticket_id)
 
 
 def _json_out(data) -> None:
     """Print data as JSON to stdout."""
     print(json.dumps(data, indent=2, default=str))
-
-
-_PRIORITY_RANK = {"high": 0, "medium": 1, "low": 2}
-
-
-def _priority_key(fm: dict) -> tuple[int, str]:
-    """Sort key for list/board output: priority high->low, then ID."""
-    return (_PRIORITY_RANK.get(fm.get("priority"), 1), fm.get("id") or "")
 
 
 # -- Commands --
@@ -576,43 +485,28 @@ def cmd_init(args) -> None:
 def cmd_list(args) -> None:
     store, docs_root = _resolve_store_and_root(args)
 
-    include_archived = getattr(args, "include_archived", False)
     use_json = getattr(args, "json", False)
 
-    tickets = parser.load_all_tickets(store, include_archive=include_archived)
-    if not tickets:
-        if use_json:
-            _json_out([])
-        else:
-            print("No tickets found.")
-        return
-
-    # Apply filters
-    status_filter = getattr(args, "status", None)
-    type_filter = getattr(args, "type", None)
-    parent_filter = getattr(args, "parent", None)
-
-    filtered = []
-    for path, fm, body in tickets:
-        eff_status = parser.effective_status(store, fm)
-
-        if status_filter and eff_status != status_filter:
-            continue
-        if type_filter and fm.get("type") != type_filter:
-            continue
-        if parent_filter:
-            p = fm.get("parent") or ""
-            if p.upper() != parent_filter.upper():
-                continue
-
-        filtered.append((path, fm, eff_status))
-
-    filtered.sort(key=lambda item: _priority_key(item[1]))
+    # The board is loaded whole (filtering is pure, and children resolve against
+    # every ticket), so an empty board is still distinguishable from filters
+    # that matched nothing -- two different messages in the table view.
+    board = service.load_board(
+        store, include_archive=getattr(args, "include_archived", False)
+    )
+    with _cli_errors():
+        filtered = service.filter_tickets(
+            board,
+            status=getattr(args, "status", None),
+            type=getattr(args, "type", None),
+            parent=getattr(args, "parent", None),
+        )
 
     if use_json:
-        idx = _children_index(tickets)
-        _json_out([_ticket_to_dict(store, path, fm, children_by_parent=idx)
-                   for path, fm, _ in filtered])
+        _json_out(filtered)
+        return
+
+    if not board:
+        print("No tickets found.")
         return
 
     if not filtered:
@@ -622,10 +516,11 @@ def cmd_list(args) -> None:
     # Print table
     print(f"{'ID':<16} {'Type':<11} {'Status':<15} {'Priority':<11} Title")
     print("-" * 75)
-    for path, fm, eff_status in filtered:
-        tier = fm.get("model_tier")
+    for t in filtered:
+        tier = t["model_tier"]
         tier_chip = f" [{tier}]" if tier else ""
-        print(f"{fm['id']:<16} {fm['type']:<11} {eff_status:<15} {fm['priority']:<11} {fm['title']}{tier_chip}")
+        print(f"{t['id']:<16} {t['type']:<11} {t['effective_status']:<15} "
+              f"{t['priority']:<11} {t['title']}{tier_chip}")
 
 
 def cmd_board(args) -> None:
@@ -715,12 +610,15 @@ def cmd_backlog(args) -> None:
 def cmd_show(args) -> None:
     store, docs_root = _resolve_store_and_root(args)
 
-    path, fm, body = _require_ticket(store, args.ticket_id)
-
     if getattr(args, "json", False):
-        _json_out(_ticket_to_dict(store, path, fm, body=body))
+        with _cli_errors():
+            _json_out(service.get_ticket(store, args.ticket_id))
         return
 
+    # The text view prints more than the ticket dict carries (blocker titles and
+    # statuses, whether `effort:` is present at all), so it renders from the
+    # frontmatter the service hands back.
+    path, fm, body = _require_ticket(store, args.ticket_id)
     eff_status = parser.effective_status(store, fm)
 
     print(f"ID:        {fm['id']}")
@@ -1807,6 +1705,101 @@ def cmd_orphans(args) -> None:
     for o in orphans:
         by = f"  (created_by: {o['created_by']})" if o.get("created_by") else ""
         print(f"  {o['id']:<12} {o['title']}  [{o['status']}]{by}")
+
+
+# -- serve (FEAT-015) --
+
+# FastAPI and uvicorn are an optional extra: the core install stays pyyaml-only,
+# so `llpm --help` (and every other command) works without them. Nothing outside
+# cmd_serve imports llpm.api.
+_SERVE_EXTRA_HINT = (
+    "Error: 'llpm serve' needs the optional API extra -- install it with "
+    "`uv tool install --editable '.[api]'`, `uv sync --extra api` in a checkout, "
+    "or `pip install 'llpm[api]'`."
+)
+
+# A board name becomes a vault stem segment, so keep it to segment-safe
+# characters rather than letting a request address arbitrary parts of the vault.
+_BOARD_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+SERVE_DEFAULT_HOST = "127.0.0.1"
+SERVE_DEFAULT_PORT = 8787
+
+
+def _board_name(cfg: dict) -> str:
+    """The name a board answers to over HTTP.
+
+    For a vault store that is its repo stem, so this repo's board is served at
+    ``/llpm/tickets`` -- the same name its stems already use. For a local dir it
+    is the directory holding the docs root (``…/<repo>/llpm`` -> ``<repo>``).
+    """
+    if cfg["kind"] == "mdtree":
+        return cfg["repo_stem"]
+    return cfg["docs_root"].parent.name or "board"
+
+
+def _serve_stores(args) -> tuple[callable, callable, str]:
+    """Wire ``llpm serve`` to its board(s): ``(store_for, boards, label)``.
+
+    Without ``--vault``: the single board from the usual config discovery,
+    served under its own name; any other repo in the path is a 404. With
+    ``--vault``: every board in that vault, one store cached per repo -- the
+    cache is the point, since a store rebuilt per request throws away its
+    connection to the vault.
+    """
+    cfg = _resolve_store_config(args)
+    vault = getattr(args, "vault", None)
+
+    if vault:
+        ca = cfg.get("ca")
+        cache: dict[str, TicketStore] = {}
+
+        def store_for(repo: str) -> TicketStore:
+            if not _BOARD_NAME_RE.match(repo):
+                raise service.Invalid(f"Invalid board name: {repo!r}")
+            if repo not in cache:
+                cache[repo] = MdTreeStore(base_url=vault, repo_stem=repo, ca=ca)
+            return cache[repo]
+
+        # list_boards scans the whole vault, so the repo stem it was built with
+        # is irrelevant -- this store exists only to ask that one question.
+        discovery = MdTreeStore(base_url=vault, repo_stem="", ca=ca)
+        return store_for, discovery.list_boards, f"every board in {vault}"
+
+    docs_root: Path = cfg.get("docs_root", Path("/dev/null/mdtree-sentinel"))
+    store = _make_store_from_config(cfg)
+    _require_initialized(docs_root, store=store)
+    board = _board_name(cfg)
+
+    def store_for(repo: str) -> TicketStore:
+        if repo != board:
+            raise service.NotFound(
+                f"No board {repo!r} on this server -- it serves {board!r}."
+            )
+        return store
+
+    where = cfg["base_url"] if cfg["kind"] == "mdtree" else docs_root
+    return store_for, (lambda: [board]), f"board {board!r} ({where})"
+
+
+def cmd_serve(args) -> None:
+    try:
+        import uvicorn
+
+        from . import api
+    except ModuleNotFoundError as e:
+        if e.name not in ("fastapi", "uvicorn"):
+            raise
+        print(_SERVE_EXTRA_HINT, file=sys.stderr)
+        raise SystemExit(1)
+
+    store_for, boards, label = _serve_stores(args)
+    host = getattr(args, "host", None) or SERVE_DEFAULT_HOST
+    port = getattr(args, "port", None) or SERVE_DEFAULT_PORT
+
+    print(f"llpm serve: {label}")
+    print(f"  http://{host}:{port}/boards")
+    uvicorn.run(api.make_app(store_for, boards=boards), host=host, port=port)
 
 
 def cmd_skills(args) -> None:

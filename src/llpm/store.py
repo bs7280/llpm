@@ -546,6 +546,22 @@ class MdTreeStore:
 
         return sorted(refs, key=lambda r: r.vault_stem)
 
+    def list_boards(self) -> list[str]:
+        """Repo names that have an llpm board in this vault.
+
+        Vault-wide, not board-scoped: the answer doesn't depend on which repo
+        this store was built for, so any ``MdTreeStore`` pointed at a vault can
+        answer it. Derived from the stems themselves (``repos.<repo>.llpm.…``)
+        rather than from a ``repos.*.llpm`` pattern, because the service's
+        fnmatch ``*`` crosses dots and intermediate stems aren't always notes.
+        """
+        boards: set[str] = set()
+        for item in self._list_pattern("repos.*.llpm.*"):
+            parts = item["stem"].split(".")
+            if len(parts) > 3 and parts[0] == "repos" and parts[2] == "llpm":
+                boards.add(parts[1])
+        return sorted(boards)
+
     def read(self, ticket_id: str) -> tuple[VaultRef, dict, str] | None:
         upper_id = ticket_id.upper()
 
