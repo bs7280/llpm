@@ -101,6 +101,9 @@ class FakeStore:
             return ("ok", dict(self.foreign[stem]))
         return ("missing", None)
 
+    def begin_read_scope(self):
+        pass  # nothing cached to drop -- see CachingStore in test_service.py
+
     def scan_by_type(self, type_value):
         return [
             (stem, dict(fm))

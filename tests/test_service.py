@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
-from conftest import load_fake_store
+from conftest import FakeStore, load_fake_store
 from llpm import parser, service
 from llpm.store import LocalDirStore
 
@@ -274,6 +274,94 @@ class TestListBoards:
         store = load_fake_store(docs_root)
         store.list_boards = lambda: ["llpm", "marginalia"]
         assert service.list_boards(store) == ["llpm", "marginalia"]
+
+
+# ---------------------------------------------------------------------------
+# Read scope (TASK-021)
+#
+# A store may cache reads *inside* one service call and must not carry that
+# cache into the next one -- `llpm serve` and marginalia's /api/llpm mount hold
+# one store per board for the life of the process, where the vault store's
+# foreign-stem cache froze a waits_on target's status until restart. This double
+# caches the way MdTreeStore does, so what is pinned here is the service's half
+# of the contract: where the scope opens. The store's half (clearing, and
+# invalidating on its own writes) lives in test_mdtreestore.py.
+# ---------------------------------------------------------------------------
+
+class CachingStore(FakeStore):
+    """FakeStore + MdTreeStore's foreign-read cache, and a read counter."""
+
+    def __init__(self):
+        super().__init__()
+        self._cache: dict[str, tuple[str, dict | None]] = {}
+        self.foreign_reads = 0
+
+    def read_foreign(self, stem):
+        if stem not in self._cache:
+            self.foreign_reads += 1
+            self._cache[stem] = super().read_foreign(stem)
+        return self._cache[stem]
+
+    def begin_read_scope(self):
+        self._cache.clear()
+
+
+class TestReadScope:
+    STEM = "repos.marginalia.llpm.features.FEAT-010"
+
+    @pytest.fixture
+    def store(self, docs_root):
+        """The fixture board in a caching store, with FEAT-002 and
+        RESEARCH-001 both waiting on one open cross-board target."""
+        loaded = load_fake_store(docs_root)
+        store = CachingStore()
+        store.active, store.archived = loaded.active, loaded.archived
+        store.foreign[self.STEM] = {"id": "FEAT-010", "status": "open"}
+        for ticket_id in ("FEAT-002", "RESEARCH-001"):
+            service.waits_add(store, ticket_id, self.STEM, today="2026-03-20")
+        store.foreign_reads = 0
+        return store
+
+    def test_a_flipped_target_is_seen_without_a_restart(self, store):
+        """TASK-021's repro: one long-lived store, target flips, dependent
+        ticket unblocks on the next read rather than at restart."""
+        first = service.get_ticket(store, "FEAT-002")
+        assert (first["waits_on"][0]["status"], first["is_blocked"]) == ("open", True)
+
+        store.foreign[self.STEM] = {"id": "FEAT-010", "status": "complete"}
+
+        second = service.get_ticket(store, "FEAT-002")
+        assert (second["waits_on"][0]["status"], second["is_blocked"]) == ("complete", False)
+
+    def test_a_listing_reads_each_distinct_stem_once(self, store):
+        """The reason the cache exists: a board resolves a shared target once,
+        not once per ticket that waits on it."""
+        listed = service.list_tickets(store)
+        assert [t["id"] for t in listed if t["waits_on"]] == ["FEAT-002", "RESEARCH-001"]
+        assert store.foreign_reads == 1
+
+    def test_every_listing_resolves_again(self, store):
+        service.list_tickets(store)
+        service.list_tickets(store)
+        assert store.foreign_reads == 2
+
+    def test_a_listing_sees_a_flip_by_the_next_call(self, store):
+        def status_in_listing():
+            listed = service.list_tickets(store)
+            return next(t for t in listed if t["id"] == "FEAT-002")["waits_on"][0]["status"]
+
+        assert status_in_listing() == "open"
+        store.foreign[self.STEM] = {"id": "FEAT-010", "status": "complete"}
+        assert status_in_listing() == "complete"
+
+    def test_a_store_without_the_method_is_left_alone(self, docs_root):
+        """Same degrade rule as subnotes/load_frontmatter: a store predating
+        the method isn't an error, it just has no scope to open."""
+        class Predates:
+            pass
+
+        service._begin_read_scope(Predates())  # no raise
+        assert ids(service.list_tickets(LocalDirStore(docs_root)))
 
 
 # ---------------------------------------------------------------------------

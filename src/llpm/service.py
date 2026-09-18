@@ -234,6 +234,29 @@ def _priority_key(fm: dict) -> tuple[int, str]:
 
 # -- Read operations ---------------------------------------------------------
 
+def _begin_read_scope(store: TicketStore) -> None:
+    """Open a read scope on the store -- one service call is one scope.
+
+    A store is allowed to cache reads inside a scope (``MdTreeStore`` keeps
+    resolved ``waits_on`` stems, so a board listing resolves each distinct one
+    once), and must not carry that cache across scopes: ``llpm serve`` and
+    marginalia's ``/api/llpm`` mount keep one store per board alive for the life
+    of the process, where a per-process cache froze a cross-board target's
+    status until restart (TASK-021).
+
+    Every path that derives blockers or waits starts at ``load_board`` (whole
+    board) or ``read_ticket`` (one ticket), so opening the scope in those two
+    covers the surface without a decorator on every function -- and without
+    reopening it mid-board, which would cost one foreign read per ticket
+    instead of one per distinct stem.
+
+    Stores without the method no-op, like ``read_foreign``/``list_boards``.
+    """
+    fn = getattr(store, "begin_read_scope", None)
+    if fn is not None:
+        fn()
+
+
 def load_board(store: TicketStore, *, include_archive: bool = False) -> list[dict]:
     """Every ticket on the board, serialized, sorted priority high->low then ID.
 
@@ -242,6 +265,7 @@ def load_board(store: TicketStore, *, include_archive: bool = False) -> list[dic
     subset filter the result -- ``filter_tickets`` is pure, and a filtered
     listing still resolves children against the *whole* board.
     """
+    _begin_read_scope(store)
     tickets = parser.load_all_tickets(store, include_archive=include_archive)
     index = children_index(tickets)
     by_id = board_index(tickets)
@@ -324,6 +348,7 @@ def read_ticket(store: TicketStore, ticket_id: str) -> tuple[Path, dict, str]:
     from, and what the CLI's text renderers need (they print blocker titles and
     statuses, which the compact ticket dict deliberately drops).
     """
+    _begin_read_scope(store)
     found = store.read(ticket_id)
     if found is None:
         raise NotFound(f"Ticket '{ticket_id}' not found.")

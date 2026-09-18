@@ -553,6 +553,55 @@ class TestMdTreeStoreReadForeign:
             store.read_foreign(FOREIGN_STEM)
         assert mock_open.call_count == 1
 
+    def test_the_cache_does_not_outlive_the_read_scope(self, store):
+        """TASK-021: the cache is per read scope, not per process. `llpm serve`
+        keeps one store per board alive, so without this a waits_on target's
+        status was frozen at whatever it was when first read."""
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.return_value = _response(TICKET_CONTENT)
+            assert store.read_foreign(FOREIGN_STEM)[1]["status"] == "open"
+
+            store.begin_read_scope()
+            mock_open.return_value = _response(
+                TICKET_CONTENT.replace("status: open", "status: complete")
+            )
+            assert store.read_foreign(FOREIGN_STEM)[1]["status"] == "complete"
+        assert mock_open.call_count == 2
+
+    def test_a_write_to_a_cached_stem_invalidates_it(self, store):
+        """The same staleness *within* a scope: a store that just wrote the
+        note it cached must not go on answering with the pre-write copy."""
+        ref = VaultRef(FOREIGN_STEM)
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.return_value = _response(TICKET_CONTENT)
+            store.read_foreign(FOREIGN_STEM)
+
+            fm, body = store.read_ref(ref)
+            fm["status"] = "complete"
+            store.write(ref, fm, body)
+
+            mock_open.return_value = _response(
+                TICKET_CONTENT.replace("status: open", "status: complete")
+            )
+            assert store.read_foreign(FOREIGN_STEM)[1]["status"] == "complete"
+
+    def test_archiving_a_cached_ticket_invalidates_it(self, store):
+        """read_foreign follows a ticket to its archive stem, so a cached entry
+        is dropped when either spelling is written."""
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.return_value = _response(TICKET_CONTENT)
+            store.read_foreign(FOREIGN_STEM)
+            store.archive(VaultRef(FOREIGN_STEM))
+        assert store._foreign_cache == {}
+
+    def test_an_unrelated_write_keeps_the_cache(self, store):
+        with patch("urllib.request.urlopen") as mock_open:
+            mock_open.return_value = _response(TICKET_CONTENT)
+            store.read_foreign(FOREIGN_STEM)
+            store.write(VaultRef("repos.myrepo.llpm.tasks.TASK-001"), {"id": "TASK-001"}, "")
+            store.read_foreign(FOREIGN_STEM)
+        assert list(store._foreign_cache) == [FOREIGN_STEM]
+
     def test_archive_variant(self):
         assert (
             MdTreeStore._archive_variant("repos.x.llpm.features.FEAT-010")

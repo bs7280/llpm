@@ -121,6 +121,25 @@ class TicketStore(Protocol):
         this protocol method) returns ``[]``."""
         ...
 
+    def begin_read_scope(self) -> None:
+        """Start a fresh read scope: drop anything this store cached from an
+        earlier one.
+
+        A store may cache reads *within* one logical operation -- ``MdTreeStore``
+        keeps resolved foreign stems, so a board listing resolves each distinct
+        ``waits_on`` target once instead of once per ticket. That cache is
+        correct for the length of a call and wrong past it: ``llpm serve`` and
+        marginalia's ``/api/llpm`` mount hold one store per board for the life
+        of the process, where a per-run cache freezes a cross-board target's
+        status at whatever it was when first read (TASK-021).
+
+        The scope is one service call, and ``service`` opens it -- callers reach
+        this through ``service._begin_read_scope``, which no-ops for a store
+        that doesn't implement it (a local directory caches nothing), the same
+        degrade rule ``read_foreign`` and ``list_boards`` follow.
+        """
+        ...
+
     def load_frontmatter(self, include_archive: bool = True) -> list[tuple[Path, dict]]:
         """Every ticket's ``(ref, frontmatter)``, however this store gets it
         cheapest -- the read behind every listing, board view and rollup.
@@ -228,6 +247,12 @@ class LocalDirStore:
     def read_foreign(self, stem: str) -> tuple[str, dict | None]:
         # A local directory has no vault to resolve foreign stems against.
         return ("unavailable", None)
+
+    def begin_read_scope(self) -> None:
+        # Nothing is cached: every read goes to the filesystem, which is the
+        # source of truth. Implemented anyway so the protocol has no optional
+        # holes for callers to probe around.
+        pass
 
     def load_frontmatter(self, include_archive: bool = True) -> list[tuple[Path, dict]]:
         """The per-ref walk, minus the bodies. A local directory reads the
@@ -361,8 +386,11 @@ class MdTreeStore:
         self._ns = f"repos.{repo_stem}.llpm"
         self._ca = ca
         self._ssl_ctx: ssl.SSLContext | None = None  # built lazily from _ca
-        # Foreign-stem read cache: several tickets often wait on the same
-        # target, and board rendering resolves each ticket independently.
+        # Foreign-stem read cache, scoped to ONE read scope (see
+        # begin_read_scope): several tickets often wait on the same target, and
+        # board rendering resolves each ticket independently. It is emptied at
+        # every service call and whenever this store writes a stem it holds, so
+        # a long-lived process never serves a frozen answer (TASK-021).
         self._foreign_cache: dict[str, tuple[str, dict | None]] = {}
 
     # -- Internal HTTP helpers ------------------------------------------------
@@ -451,6 +479,7 @@ class MdTreeStore:
 
     def _put(self, stem: str, content: str) -> None:
         """Upsert a note (overwrite if exists)."""
+        self._invalidate(stem)
         data = json.dumps({"content": content}).encode()
         req = urllib.request.Request(
             self._url(stem),
@@ -463,6 +492,7 @@ class MdTreeStore:
 
     def _put_exclusive(self, stem: str, content: str) -> None:
         """Create a note only if it doesn't exist. Raises FileExistsError on 409."""
+        self._invalidate(stem)
         data = json.dumps({"content": content}).encode()
         url = self._url(stem) + "?if_absent=true"
         req = urllib.request.Request(
@@ -480,11 +510,13 @@ class MdTreeStore:
             raise
 
     def _delete(self, stem: str) -> None:
+        self._invalidate(stem)
         req = urllib.request.Request(self._url(stem), method="DELETE")
         with self._open(req):
             pass
 
     def _move(self, stem: str, new_stem: str) -> None:
+        self._invalidate(stem, new_stem)
         url = (
             self._url(stem)
             + "/move?new_stem="
@@ -725,6 +757,29 @@ class MdTreeStore:
 
     def exists(self, ticket_id: str) -> bool:
         return self.read(ticket_id) is not None
+
+    def begin_read_scope(self) -> None:
+        """Empty the foreign-stem cache (see the protocol's docstring).
+
+        Cheap and unconditional: a board load repopulates only the stems it
+        actually touches, and every other caller reads one ticket."""
+        self._foreign_cache.clear()
+
+    def _invalidate(self, *stems: str) -> None:
+        """Forget cached foreign reads of stems this store is about to write.
+
+        A read scope that writes the very note it cached would otherwise go on
+        answering with the pre-write frontmatter -- the same staleness across a
+        call that ``begin_read_scope`` fixes across calls. Archiving moves a
+        ticket to a sibling stem, and ``read_foreign`` follows that move, so a
+        cached entry is dropped when *either* spelling is written.
+        """
+        if not self._foreign_cache:
+            return
+        targets = set(stems)
+        for key in list(self._foreign_cache):
+            if key in targets or self._archive_variant(key) in targets:
+                del self._foreign_cache[key]
 
     def read_foreign(self, stem: str) -> tuple[str, dict | None]:
         if stem not in self._foreign_cache:

@@ -299,6 +299,9 @@ class FakeStore:
     def read_foreign(self, stem):
         return ("unavailable", None)
 
+    def begin_read_scope(self):
+        pass  # nothing cached to drop
+
     def scan_by_type(self, type_value):
         return [
             (fm["id"], dict(fm))
