@@ -1,11 +1,12 @@
-"""Tests for the service layer (TASK-016).
+"""Tests for the service layer (TASK-016 reads, TASK-017 ``set_status``).
 
 Every service function runs against BOTH stores -- the local directory and the
 fake vault -- holding the same board, because the whole point of the seam is
 that a board answers the same way whichever store it is read through.
 
 The CLI regression net lives in test_commands.py / test_json.py: those tests are
-unchanged, and `cmd_list` / `cmd_show` now reach ticket data through here.
+unchanged, and `cmd_list` / `cmd_show` / `cmd_status` now reach ticket data
+through here.
 """
 
 from __future__ import annotations
@@ -229,3 +230,207 @@ class TestListBoards:
         store = load_fake_store(docs_root)
         store.list_boards = lambda: ["llpm", "marginalia"]
         assert service.list_boards(store) == ["llpm", "marginalia"]
+
+
+# ---------------------------------------------------------------------------
+# set_status (TASK-017)
+#
+# These mirror the cmd_status tests in test_commands.py / test_vault_commands.py
+# one level down: the rules now live here, and those CLI tests are the
+# unchanged regression net proving the printer still says the same things.
+# ---------------------------------------------------------------------------
+
+def status_of(store, ticket_id: str) -> str:
+    """The *stored* status, read back through the store."""
+    _, fm, _ = service.read_ticket(store, ticket_id)
+    return fm["status"]
+
+
+def frontmatter(store, ticket_id: str) -> dict:
+    return service.read_ticket(store, ticket_id)[1]
+
+
+class TestSetStatus:
+    def test_reports_the_transition(self, store):
+        assert service.set_status(store, "FEAT-002", "review", today="2026-03-20") == {
+            "id": "FEAT-002",
+            "previous_status": "in-progress",
+            "status": "review",
+            "commits_captured": 0,
+        }
+
+    def test_writes_through_the_store(self, store):
+        service.set_status(store, "FEAT-002", "review", today="2026-03-20")
+        assert status_of(store, "FEAT-002") == "review"
+
+    def test_id_is_case_insensitive(self, store):
+        service.set_status(store, "feat-002", "review", today="2026-03-20")
+        assert status_of(store, "FEAT-002") == "review"
+
+    def test_stamps_updated(self, store):
+        service.set_status(store, "FEAT-002", "review", today="2026-03-20")
+        assert frontmatter(store, "FEAT-002")["updated"] == "2026-03-20"
+
+    def test_without_a_date_it_stamps_the_servers_day(self, store):
+        """The CLI passes its own mockable clock; an HTTP write has none."""
+        with patch.object(service, "_today", return_value="2026-05-05"):
+            service.set_status(store, "FEAT-002", "review")
+        assert frontmatter(store, "FEAT-002")["updated"] == "2026-05-05"
+
+    def test_complete_stamps_completed(self, store):
+        service.set_status(store, "FEAT-002", "complete", today="2026-03-20")
+        assert frontmatter(store, "FEAT-002")["completed"] == "2026-03-20"
+
+    def test_complete_keeps_an_existing_completed_date(self, store):
+        service.set_status(store, "FEAT-002", "complete", today="2026-03-20")
+        service.set_status(store, "FEAT-002", "open", today="2026-03-21")
+        service.set_status(store, "FEAT-002", "complete", today="2026-03-22")
+        assert frontmatter(store, "FEAT-002")["completed"] == "2026-03-20"
+
+    def test_stamps_managed_by(self, store):
+        """Fixture tickets predate managed_by; every mutation adds it."""
+        assert "managed_by" not in frontmatter(store, "FEAT-002")
+        service.set_status(store, "FEAT-002", "review", today="2026-03-20")
+        assert frontmatter(store, "FEAT-002")["managed_by"] == "llpm"
+
+    def test_body_is_left_alone(self, store):
+        before = service.read_ticket(store, "FEAT-002")[2]
+        service.set_status(store, "FEAT-002", "review", today="2026-03-20")
+        assert service.read_ticket(store, "FEAT-002")[2] == before
+
+    def test_unknown_id_raises_not_found(self, store):
+        with pytest.raises(service.NotFound) as e:
+            service.set_status(store, "NOPE-999", "open")
+        assert str(e.value) == "Ticket 'NOPE-999' not found."
+
+    def test_invalid_status_is_invalid(self, store):
+        with pytest.raises(service.Invalid) as e:
+            service.set_status(store, "FEAT-002", "shipped")
+        assert "Invalid status: 'shipped'" in str(e.value)
+        for value in sorted(parser.VALID_STATUSES):
+            assert value in str(e.value)
+        assert status_of(store, "FEAT-002") == "in-progress"
+
+    def test_blocked_is_not_settable(self, store):
+        """`blocked` is derived from unresolved blockers, never stored."""
+        with pytest.raises(service.Invalid):
+            service.set_status(store, "FEAT-002", "blocked")
+
+    def test_a_rejected_call_never_touches_the_store(self, store):
+        """Validation runs before the read, so a bad request costs no I/O."""
+        store.read = lambda tid: pytest.fail(f"read {tid}")
+        with pytest.raises(service.Invalid):
+            service.set_status(store, "FEAT-002", "shipped")
+        with pytest.raises(service.Invalid):
+            service.set_status(store, "FEAT-002", "open", awaiting="deploy")
+
+
+class TestSetStatusAwaiting:
+    """FEAT-012: awaiting -- the review-queue discriminator."""
+
+    def test_set_on_review(self, store):
+        service.set_status(store, "FEAT-002", "review", awaiting="deploy", today="2026-03-20")
+        assert frontmatter(store, "FEAT-002")["awaiting"] == "deploy"
+
+    def test_absent_when_not_passed(self, store):
+        service.set_status(store, "FEAT-002", "review", today="2026-03-20")
+        assert "awaiting" not in frontmatter(store, "FEAT-002")
+
+    def test_explicit_reviewer_allowed(self, store):
+        service.set_status(store, "FEAT-002", "review", awaiting="reviewer", today="2026-03-20")
+        assert frontmatter(store, "FEAT-002")["awaiting"] == "reviewer"
+
+    def test_rejected_on_a_non_review_target(self, store):
+        with pytest.raises(service.Invalid) as e:
+            service.set_status(store, "FEAT-002", "open", awaiting="deploy")
+        # Verbatim what the CLI has always printed after `Error: `.
+        assert str(e.value) == (
+            "--awaiting is only valid when the target status is 'review' (got 'open')."
+        )
+
+    def test_invalid_enum_rejected(self, store):
+        with pytest.raises(service.Invalid) as e:
+            service.set_status(store, "FEAT-002", "review", awaiting="bogus")
+        assert "Invalid awaiting 'bogus'" in str(e.value)
+        for value in ("reviewer", "push", "deploy", "human-verify", "human-answer"):
+            assert value in str(e.value)
+
+    def test_self_clears_on_the_next_transition(self, store):
+        service.set_status(store, "FEAT-002", "review", awaiting="deploy", today="2026-03-20")
+        service.set_status(store, "FEAT-002", "complete", today="2026-03-21")
+        assert "awaiting" not in frontmatter(store, "FEAT-002")
+
+    def test_reentering_review_without_awaiting_clears_it(self, store):
+        service.set_status(store, "FEAT-002", "review", awaiting="deploy", today="2026-03-20")
+        service.set_status(store, "FEAT-002", "in-progress", today="2026-03-21")
+        service.set_status(store, "FEAT-002", "review", today="2026-03-22")
+        assert "awaiting" not in frontmatter(store, "FEAT-002")
+
+
+class TestSetStatusCommits:
+    """FEAT-007: commits[] merge. Which SHAs arrive is the caller's business --
+    the CLI harvests them from its CWD git repo, the API is handed them."""
+
+    def test_records_the_given_shas(self, store):
+        sha = "a" * 40
+        result = service.set_status(
+            store, "FEAT-002", "review", commits=[sha], today="2026-03-20"
+        )
+        assert result["commits_captured"] == 1
+        assert frontmatter(store, "FEAT-002")["commits"] == [sha]
+
+    def test_records_on_any_status_not_just_review(self, store):
+        service.set_status(store, "TASK-001", "in-progress", commits=["abc1234"],
+                           today="2026-03-20")
+        assert frontmatter(store, "TASK-001")["commits"] == ["abc1234"]
+
+    def test_prefix_dedup_across_calls(self, store):
+        full = "b" * 40
+        service.set_status(store, "FEAT-002", "review", commits=[full], today="2026-03-20")
+        result = service.set_status(
+            store, "FEAT-002", "complete", commits=[full[:8]], today="2026-03-21"
+        )
+        assert result["commits_captured"] == 0
+        assert frontmatter(store, "FEAT-002")["commits"] == [full]
+
+    def test_existing_entries_are_never_removed(self, store):
+        service.set_status(store, "FEAT-002", "review", commits=["c" * 40], today="2026-03-20")
+        service.set_status(store, "FEAT-002", "complete", commits=["d" * 40], today="2026-03-21")
+        assert frontmatter(store, "FEAT-002")["commits"] == ["c" * 40, "d" * 40]
+
+    def test_no_commits_no_key(self, store):
+        """A ticket that never had commits: doesn't grow an empty one."""
+        service.set_status(store, "FEAT-002", "review", commits=[], today="2026-03-20")
+        assert "commits" not in frontmatter(store, "FEAT-002")
+
+
+class TestSetStatusReturnedTicket:
+    def test_include_ticket_matches_a_plain_read(self, store):
+        """The POST response has to be exactly what a GET would say."""
+        result = service.set_status(
+            store, "FEAT-002", "review", awaiting="deploy",
+            today="2026-03-20", include_ticket=True,
+        )
+        assert result["ticket"] == service.get_ticket(store, "FEAT-002")
+        assert result["ticket"]["status"] == "review"
+        assert result["ticket"]["awaiting"] == "deploy"
+
+    def test_omitted_by_default(self, store):
+        result = service.set_status(store, "FEAT-002", "review", today="2026-03-20")
+        assert "ticket" not in result
+
+    def test_serialization_is_opt_in_because_it_costs_reads(self, store):
+        """Serializing re-derives blockers (a store read each) and loads the
+        board for `children`. The CLI prints `ID: old -> new` and must not pay
+        for that -- on the vault those are HTTP round trips."""
+        reads: list[str] = []
+        real_read = store.read
+        store.read = lambda tid: (reads.append(tid), real_read(tid))[1]
+
+        service.set_status(store, "TASK-001", "in-progress", today="2026-03-20")
+        assert reads == ["TASK-001"]  # TASK-001 has two blockers; neither is read
+
+        reads.clear()
+        service.set_status(store, "TASK-001", "review", today="2026-03-21",
+                           include_ticket=True)
+        assert sorted(reads) == ["FEAT-001", "FEAT-002", "TASK-001"]

@@ -1,4 +1,4 @@
-"""Router tests for llpm's HTTP surface (TASK-016).
+"""Router tests for llpm's HTTP surface (TASK-016 reads, TASK-017 status).
 
 The router is the thin half: these tests check wiring, query-param plumbing and
 error mapping. What the JSON *says* is the service's contract, pinned in
@@ -17,7 +17,7 @@ pytest.importorskip("fastapi", reason="needs the llpm[api] extra")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from conftest import load_fake_store  # noqa: E402
-from llpm import api, service  # noqa: E402
+from llpm import api, commands, service  # noqa: E402
 from llpm.store import LocalDirStore  # noqa: E402
 
 
@@ -161,3 +161,87 @@ class TestManyBoardsOneApp:
         client.get("/alpha/tickets")
         client.get("/alpha/tickets")
         assert calls == ["alpha", "alpha"]
+
+
+class TestStatusEndpoint:
+    """TASK-017: the first write. Rules live in `service.set_status` (pinned in
+    test_service.py); these tests are about the HTTP skin over it."""
+
+    def test_happy_path_with_awaiting(self, client):
+        r = client.post("/demo/tickets/FEAT-002/status",
+                        json={"status": "review", "awaiting": "deploy"})
+        assert r.status_code == 200
+        ticket = r.json()
+        assert ticket["status"] == "review"
+        assert ticket["awaiting"] == "deploy"
+
+    def test_answers_what_a_get_would_say(self, client):
+        """The response is the updated ticket dict and nothing reshaped."""
+        posted = client.post("/demo/tickets/FEAT-002/status", json={"status": "review"}).json()
+        assert posted == client.get("/demo/tickets/FEAT-002").json()
+
+    def test_the_change_is_persisted(self, client):
+        client.post("/demo/tickets/FEAT-002/status", json={"status": "complete"})
+        assert client.get("/demo/tickets/FEAT-002").json()["status"] == "complete"
+
+    def test_commits_come_from_the_body(self, client):
+        sha = "e" * 40
+        ticket = client.post("/demo/tickets/FEAT-002/status",
+                             json={"status": "review", "commits": [sha]}).json()
+        assert ticket["commits"] == [sha]
+
+    def test_the_server_never_runs_git(self, client, monkeypatch):
+        """Harvesting is the CLI's job -- it has a CWD and a checkout. A request
+        that names no commits records none, whatever the server's CWD holds."""
+        monkeypatch.setattr(commands, "_harvest_commits", lambda tid: ["f" * 40])
+        ticket = client.post("/demo/tickets/FEAT-002/status", json={"status": "review"}).json()
+        assert ticket["commits"] == []
+
+    def test_awaiting_on_a_non_review_target_is_422(self, client):
+        r = client.post("/demo/tickets/FEAT-002/status",
+                        json={"status": "open", "awaiting": "deploy"})
+        assert r.status_code == 422
+        # The same sentence `llpm status` prints.
+        assert r.json()["detail"] == (
+            "--awaiting is only valid when the target status is 'review' (got 'open')."
+        )
+        assert client.get("/demo/tickets/FEAT-002").json()["status"] == "in-progress"
+
+    def test_invalid_awaiting_is_422(self, client):
+        r = client.post("/demo/tickets/FEAT-002/status",
+                        json={"status": "review", "awaiting": "bogus"})
+        assert r.status_code == 422
+        assert "Invalid awaiting 'bogus'" in r.json()["detail"]
+
+    def test_invalid_status_is_422(self, client):
+        r = client.post("/demo/tickets/FEAT-002/status", json={"status": "shipped"})
+        assert r.status_code == 422
+        assert "Invalid status: 'shipped'" in r.json()["detail"]
+
+    def test_derived_blocked_is_not_settable(self, client):
+        r = client.post("/demo/tickets/FEAT-002/status", json={"status": "blocked"})
+        assert r.status_code == 422
+
+    def test_unknown_id_is_404(self, client):
+        r = client.post("/demo/tickets/NOPE-999/status", json={"status": "open"})
+        assert r.status_code == 404
+        assert r.json()["detail"] == "Ticket 'NOPE-999' not found."
+
+    def test_unknown_board_is_404(self, client):
+        r = client.post("/nosuch/tickets/FEAT-002/status", json={"status": "open"})
+        assert r.status_code == 404
+
+    def test_missing_status_is_422(self, client):
+        assert client.post("/demo/tickets/FEAT-002/status", json={}).status_code == 422
+
+    def test_a_store_write_conflict_is_409(self, client, monkeypatch):
+        """Nothing raises Conflict today (no store has a write precondition, so
+        concurrent writes are last-writer-wins) -- the mapping is wired ahead of
+        the ETag that would."""
+        def boom(*a, **kw):
+            raise service.Conflict("Ticket 'FEAT-002' changed underneath this write.")
+
+        monkeypatch.setattr(service, "set_status", boom)
+        r = client.post("/demo/tickets/FEAT-002/status", json={"status": "review"})
+        assert r.status_code == 409
+        assert "changed underneath" in r.json()["detail"]

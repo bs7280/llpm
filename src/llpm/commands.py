@@ -23,9 +23,10 @@ from pathlib import Path
 import yaml
 
 from . import parser, service
-from .service import _as_hours, _priority_key, _split_keys
+from .service import _as_hours, _merge_commits, _priority_key, _split_keys
 from .service import children_index as _children_index
 from .service import ticket_dict as _ticket_to_dict
+from .service import write_ticket as _write_ticket
 from .store import LocalDirStore, MdTreeStore, TicketStore
 
 
@@ -272,14 +273,6 @@ def _require_initialized(docs_root: Path, store: TicketStore | None = None) -> N
         raise SystemExit(1)
 
 
-def _write_ticket(store: TicketStore, ref: Path, fm: dict, body: str) -> None:
-    """Chokepoint for every ticket mutation: stamps the ownership key
-    (``managed_by: llpm``, decision 6 -- the k8s kind/managed-by split) so
-    tickets self-describe their write path, then writes through the store."""
-    fm.setdefault("managed_by", "llpm")
-    store.write(ref, fm, body)
-
-
 def _resolve_provenance(args) -> tuple[str, str | None]:
     """Resolve (origin, created_by) for a new ticket.
 
@@ -404,19 +397,6 @@ def _harvest_commits(ticket_id: str) -> list[str]:
         if pattern.search(subject):
             shas.append(sha)
     return shas[::-1]
-
-
-def _merge_commits(existing: list[str], new_shas: list[str]) -> list[str]:
-    """Append new SHAs, prefix-aware so short and full forms of the same
-    commit don't both land in the list. Never removes entries."""
-    merged = list(existing)
-    for sha in new_shas:
-        sha = sha.strip()
-        if not sha:
-            continue
-        if not any(m.startswith(sha) or sha.startswith(m) for m in merged):
-            merged.append(sha)
-    return merged
 
 
 @contextmanager
@@ -841,62 +821,33 @@ def cmd_create(args) -> None:
 
 
 def cmd_status(args) -> None:
+    """Harvest, call, print. The rules live in ``service.set_status``.
+
+    Harvesting stays here because it needs a CWD git repo: explicit --commit
+    SHAs record on any status change, and auto-harvest runs at review AND
+    complete, so the worker's git context is used even when someone else later
+    flips complete elsewhere. The server never runs git -- it passes commits in.
+    """
     store, docs_root = _resolve_store_and_root(args)
 
-    path, fm, body = _require_ticket(store, args.ticket_id)
-    old_status = fm["status"]
     new_status = args.new_status
-
-    # awaiting: — review-queue discriminator (FEAT-012). Only meaningful
-    # alongside a transition INTO review -- error loudly otherwise rather
-    # than silently accepting a flag that would have no effect.
-    awaiting = getattr(args, "awaiting", None)
-    if awaiting is not None:
-        if new_status != "review":
-            print(
-                f"Error: --awaiting is only valid when the target status is "
-                f"'review' (got '{new_status}').",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
-        if awaiting not in parser.VALID_AWAITING:
-            print(
-                f"Error: Invalid awaiting '{awaiting}'. Must be one of: "
-                f"{', '.join(sorted(parser.VALID_AWAITING))}",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
-
-    fm["status"] = new_status
-    fm["updated"] = _today()
-
-    # Self-clear: every transition drops any prior 'awaiting', then re-adds
-    # it only if --awaiting was passed on THIS invocation (already
-    # constrained to new_status == "review" above).
-    fm.pop("awaiting", None)
-    if awaiting is not None:
-        fm["awaiting"] = awaiting
-
-    if new_status == "complete" and not fm.get("completed"):
-        fm["completed"] = _today()
-
-    # Commit capture (FEAT-007). Explicit --commit SHAs record on any status
-    # change; auto-harvest runs at review AND complete, so the worker's git
-    # context is used even when someone else later flips complete elsewhere.
     explicit = list(getattr(args, "commit", None) or [])
-    harvested = _harvest_commits(fm["id"]) if new_status in ("review", "complete") else []
-    captured = 0
-    if explicit or harvested:
-        existing = list(fm.get("commits") or [])
-        merged = _merge_commits(existing, harvested + explicit)
-        captured = len(merged) - len(existing)
-        if merged:
-            fm["commits"] = merged
+    auto_harvest = new_status in ("review", "complete")
+    harvested = _harvest_commits(args.ticket_id.upper()) if auto_harvest else []
 
-    _write_ticket(store, path, fm, body)
-    print(f"{fm['id']}: {old_status} -> {new_status}")
-    if captured:
-        print(f"Captured {captured} commit(s) -> commits[]")
+    with _cli_errors():
+        result = service.set_status(
+            store,
+            args.ticket_id,
+            new_status,
+            awaiting=getattr(args, "awaiting", None),
+            commits=harvested + explicit,
+            today=_today(),
+        )
+
+    print(f"{result['id']}: {result['previous_status']} -> {result['status']}")
+    if result["commits_captured"]:
+        print(f"Captured {result['commits_captured']} commit(s) -> commits[]")
 
 
 # `set` values arrive as strings. Numeric-looking ones become numbers (so

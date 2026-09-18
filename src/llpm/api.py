@@ -16,10 +16,10 @@ Two entry points:
 maps a repo name to its ``TicketStore`` (and caches it -- building a store per
 request would throw away the vault connection).
 
-This slice serves the read side. The write endpoints (status, create, PATCH,
-edges) land in the slices that follow and hang off the same ``_mapped()``
-error mapping, which is the whole point of the typed service errors:
-``NotFound`` -> 404, ``Invalid`` -> 422, ``Conflict`` -> 409.
+TASK-016 served the read side, TASK-017 the status write. The remaining write
+endpoints (create, PATCH, edges) land in the slices that follow and hang off the
+same ``_mapped()`` error mapping, which is the whole point of the typed service
+errors: ``NotFound`` -> 404, ``Invalid`` -> 422, ``Conflict`` -> 409.
 """
 
 from __future__ import annotations
@@ -28,12 +28,27 @@ from collections.abc import Callable
 from contextlib import contextmanager
 
 from fastapi import APIRouter, FastAPI, HTTPException
+from pydantic import BaseModel
 
 from . import service
 from .store import TicketStore
 
 StoreFor = Callable[[str], TicketStore]
 Boards = Callable[[], list[str]]
+
+
+class StatusChange(BaseModel):
+    """Body of ``POST /{repo}/tickets/{id}/status``.
+
+    ``commits`` is a list because the server has no checkout and must never run
+    git: the CLI harvests SHAs from its CWD repo, an HTTP caller names them.
+    The values are checked by ``service.set_status`` against llpm's own rules,
+    not here -- a status typo has to produce llpm's message, not pydantic's.
+    """
+
+    status: str
+    awaiting: str | None = None
+    commits: list[str] | None = None
 
 
 @contextmanager
@@ -108,6 +123,20 @@ def make_router(store_for: StoreFor, boards: Boards | None = None) -> APIRouter:
     def get_ticket(repo: str, ticket_id: str, body: bool = True):
         with _mapped():
             return service.get_ticket(store_for(repo), ticket_id, body=body)
+
+    @router.post("/{repo}/tickets/{ticket_id}/status")
+    def post_status(repo: str, ticket_id: str, change: StatusChange):
+        """Change a status; answer with the ticket as ``GET`` would render it."""
+        with _mapped():
+            result = service.set_status(
+                store_for(repo),
+                ticket_id,
+                change.status,
+                awaiting=change.awaiting,
+                commits=change.commits,
+                include_ticket=True,
+            )
+        return result["ticket"]
 
     return router
 

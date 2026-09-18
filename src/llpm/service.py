@@ -7,13 +7,14 @@ thin callers of the same functions. Service functions never print and never
 each caller renders in its own idiom (``Error: …`` + exit 1 for the CLI,
 404/422/409 for the API).
 
-This is FEAT-015's first slice (TASK-016) and covers the read side only. The
-writes -- ``set_status``, ``create_ticket``, ``set_fields`` and the edge pairs
--- belong here too and land in the slices that follow.
+FEAT-015 lands this in slices: TASK-016 brought the read side, TASK-017
+``set_status``. The rest of the writes -- ``create_ticket``, ``set_fields`` and
+the edge pairs -- belong here too and follow.
 """
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 from . import parser
@@ -44,7 +45,12 @@ class Invalid(ServiceError):
 class Conflict(ServiceError):
     """The store refused a write because the note moved underneath us. -> 409.
 
-    Unraised by the read slice; the write slices raise it.
+    Nothing raises this yet: no store has a write precondition. ``LocalDirStore``
+    writes the file and ``MdTreeStore`` PUTs the note, both unconditionally, so
+    concurrent writes to one ticket are last-writer-wins. The class and the 409
+    mapping exist so that when a precondition (an ETag / ``If-Match`` on the
+    vault's PUT) arrives, it becomes a store-level change and callers need no
+    edit. See TASK-017's handoff.
     """
 
 
@@ -313,3 +319,127 @@ def list_boards(store: TicketStore) -> list[str]:
     if fn is None:
         return []
     return fn()
+
+
+# -- Write operations --------------------------------------------------------
+
+def _today() -> str:
+    """Today as YYYY-MM-DD -- the fallback when a caller supplies no date.
+
+    The CLI has its own mockable ``commands._today`` that the whole CLI test
+    suite patches, and it passes the result in as ``today=``. A write that
+    arrives over HTTP has no such clock and stamps the server's day.
+    """
+    return date.today().isoformat()
+
+
+def write_ticket(store: TicketStore, ref: Path, fm: dict, body: str) -> None:
+    """Chokepoint for every ticket mutation: stamps the ownership key
+    (``managed_by: llpm``, decision 6 -- the k8s kind/managed-by split) so
+    tickets self-describe their write path, then writes through the store."""
+    fm.setdefault("managed_by", "llpm")
+    store.write(ref, fm, body)
+
+
+def _merge_commits(existing: list[str], new_shas: list[str]) -> list[str]:
+    """Append new SHAs, prefix-aware so short and full forms of the same
+    commit don't both land in the list. Never removes entries."""
+    merged = list(existing)
+    for sha in new_shas:
+        sha = sha.strip()
+        if not sha:
+            continue
+        if not any(m.startswith(sha) or sha.startswith(m) for m in merged):
+            merged.append(sha)
+    return merged
+
+
+def set_status(
+    store: TicketStore,
+    ticket_id: str,
+    status: str,
+    *,
+    awaiting: str | None = None,
+    commits: list[str] | None = None,
+    today: str | None = None,
+    include_ticket: bool = False,
+) -> dict:
+    """Change a ticket's status -- ``llpm status`` and ``POST …/status``.
+
+    One read, one write. ``commits`` are SHAs to record, already gathered by
+    the caller: the CLI harvests them from its CWD git repo (``commands.
+    _harvest_commits``) and the API takes them in the request body, because the
+    server has no checkout and must never run git.
+
+    Returns the transition, not a ticket::
+
+        {"id", "previous_status", "status", "commits_captured"}
+
+    plus ``"ticket"`` (the serialized ticket dict) when ``include_ticket`` is
+    set. It is opt-in because serializing re-derives blockers and waits and
+    loads the whole board for ``children`` -- dozens of vault round trips that
+    the CLI, which only prints ``ID: old -> new``, has no use for.
+
+    Raises ``NotFound`` for an unknown id and ``Invalid`` for a status or
+    ``awaiting`` value llpm's rules reject, with the message text the CLI has
+    always printed.
+    """
+    if status not in parser.VALID_STATUSES:
+        raise Invalid(
+            f"Invalid status: '{status}'. Must be one of: "
+            f"{', '.join(sorted(parser.VALID_STATUSES))}"
+        )
+
+    # awaiting: -- review-queue discriminator (FEAT-012). Only meaningful
+    # alongside a transition INTO review -- error loudly otherwise rather
+    # than silently accepting a value that would have no effect.
+    if awaiting is not None:
+        if status != "review":
+            raise Invalid(
+                f"--awaiting is only valid when the target status is "
+                f"'review' (got '{status}')."
+            )
+        if awaiting not in parser.VALID_AWAITING:
+            raise Invalid(
+                f"Invalid awaiting '{awaiting}'. Must be one of: "
+                f"{', '.join(sorted(parser.VALID_AWAITING))}"
+            )
+
+    ref, fm, body = read_ticket(store, ticket_id)
+    previous_status = fm["status"]
+    stamp = today or _today()
+
+    fm["status"] = status
+    fm["updated"] = stamp
+
+    # Self-clear: every transition drops any prior 'awaiting', then re-adds
+    # it only if one was passed on THIS call (already constrained to
+    # status == "review" above).
+    fm.pop("awaiting", None)
+    if awaiting is not None:
+        fm["awaiting"] = awaiting
+
+    if status == "complete" and not fm.get("completed"):
+        fm["completed"] = stamp
+
+    # Commit capture (FEAT-007). Which SHAs reach here is the caller's call;
+    # merging them onto commits[] is the rule.
+    captured = 0
+    if commits:
+        existing = list(fm.get("commits") or [])
+        merged = _merge_commits(existing, list(commits))
+        captured = len(merged) - len(existing)
+        if merged:
+            fm["commits"] = merged
+
+    write_ticket(store, ref, fm, body)
+
+    result = {
+        "id": fm["id"],
+        "previous_status": previous_status,
+        "status": status,
+        "commits_captured": captured,
+    }
+    if include_ticket:
+        result["ticket"] = ticket_dict(store, ref, fm, body=body)
+    return result
