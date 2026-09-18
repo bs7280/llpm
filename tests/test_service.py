@@ -1363,3 +1363,218 @@ class TestLintTickets:
         without_candidate = store.body_reads
 
         assert with_candidate - without_candidate == 1
+
+
+# ---------------------------------------------------------------------------
+# next_tickets (FEAT-009)
+#
+# The scheduler primitive the autonomous loop calls. Two halves are pinned
+# here: WHICH tickets are ready (the same `dispatch_problems` predicate
+# `llpm lint` reports, over the effectively-open set), and in WHAT ORDER --
+# a total one, so the same board always answers the same way.
+# ---------------------------------------------------------------------------
+
+def _ready_ticket(store, title, **fields):
+    """A ticket nothing stops a worker from taking: open, criteria written,
+    effort set, model_tier from the template."""
+    fields.setdefault("effort", "small")
+    return _add_ticket(store, title, body=DISPATCHABLE_BODY, **fields)
+
+
+class TestNextTicketsReadySet:
+    def test_the_fixture_board_offers_nothing(self, store):
+        # TASK-001 is the only stored-`open` ticket and FEAT-002 blocks it.
+        assert service.next_tickets(store) == []
+
+    def test_a_dispatchable_ticket_is_selected(self, store):
+        ticket_id = _ready_ticket(store, "Ready")
+        assert ids(service.next_tickets(store)) == [ticket_id]
+
+    def test_the_entry_is_the_listing_shape(self, store):
+        ticket_id = _ready_ticket(store, "Ready")
+        picked = service.next_tickets(store)[0]
+        assert picked == next(
+            t for t in service.list_tickets(store) if t["id"] == ticket_id
+        )
+        assert "body" not in picked
+
+    def test_a_blocked_ticket_is_excluded(self, store):
+        ticket_id = _ready_ticket(store, "Ready")
+        service.blocker_add(store, ticket_id, "FEAT-002", today="2026-03-20")
+        assert service.next_tickets(store) == []
+
+    def test_a_resolved_blocker_does_not_exclude(self, store):
+        ticket_id = _ready_ticket(store, "Ready")
+        service.blocker_add(store, ticket_id, "FEAT-001", today="2026-03-20")
+        assert ids(service.next_tickets(store)) == [ticket_id]
+
+    def test_a_requires_human_ticket_is_excluded(self, store):
+        _ready_ticket(store, "For a person", requires_human=True)
+        assert service.next_tickets(store) == []
+
+    def test_a_ticket_with_no_criteria_is_excluded(self, store):
+        _add_ticket(store, "No criteria", body="## Description\n\ndo it\n",
+                    effort="small")
+        assert service.next_tickets(store) == []
+
+    def test_placeholder_criteria_are_not_criteria(self, store):
+        _add_ticket(store, "Still the template",
+                    body="## Acceptance Criteria\n\n- [ ] _Criterion 1_\n",
+                    effort="small")
+        assert service.next_tickets(store) == []
+
+    def test_a_ticket_with_no_effort_is_excluded(self, store):
+        _add_ticket(store, "Unsized", body=DISPATCHABLE_BODY)
+        assert service.next_tickets(store) == []
+
+    def test_only_open_tickets_are_ready(self, store):
+        """draft/planned are the pre-work pipeline, in-progress is claimed,
+        review is parked -- none of them is a worker's next ticket."""
+        for status in ("draft", "planned", "in-progress", "review", "complete"):
+            ticket_id = _ready_ticket(store, f"In {status}", status=status)
+            assert service.next_tickets(store) == [], status
+            service.set_status(store, ticket_id, "closed", today="2026-03-20")
+
+
+class TestNextTicketsTier:
+    def test_an_equal_tier_is_selected(self, store):
+        ticket_id = _ready_ticket(store, "Heavy work", model_tier="heavy")
+        assert ids(service.next_tickets(store, tier="heavy")) == [ticket_id]
+
+    def test_another_tier_is_excluded(self, store):
+        _ready_ticket(store, "Heavy work", model_tier="heavy")
+        assert service.next_tickets(store, tier="light") == []
+
+    def test_without_a_tier_every_tier_is_offered(self, store):
+        heavy = _ready_ticket(store, "Heavy work", model_tier="heavy")
+        light = _ready_ticket(store, "Light work", model_tier="light")
+        assert sorted(ids(service.next_tickets(store, limit=5))) == sorted([heavy, light])
+
+    def test_an_untagged_ticket_is_never_offered_at_all(self, store):
+        """The `or unset` half of the tier filter is unreachable today, and
+        deliberately so: `no-tier` is one of `dispatch_problems`' codes, so a
+        ticket with no `model_tier` is not dispatch-ready with or without a
+        tier filter. Pinned because the filter is written to admit it."""
+        _ready_ticket(store, "Untagged", model_tier=None)
+        assert service.next_tickets(store) == []
+        assert service.next_tickets(store, tier="heavy") == []
+
+    def test_an_unknown_tier_is_named(self, store):
+        with pytest.raises(service.Invalid) as e:
+            service.next_tickets(store, tier="gigantic")
+        assert "Invalid model_tier: 'gigantic'" in str(e.value)
+
+
+class TestNextTicketsOrder:
+    def test_priority_high_to_low(self, store):
+        low = _ready_ticket(store, "Low", priority="low")
+        high = _ready_ticket(store, "High", priority="high")
+        medium = _ready_ticket(store, "Medium", priority="medium")
+        assert ids(service.next_tickets(store, limit=5)) == [high, medium, low]
+
+    def test_id_breaks_a_full_tie(self, store):
+        first = _ready_ticket(store, "One")
+        second = _ready_ticket(store, "Two")
+        assert ids(service.next_tickets(store, limit=5)) == sorted([first, second])
+
+    def test_an_unsatisfied_after_ranks_last(self, store):
+        # FEAT-002 is in-progress, so TASK-002's `after` is unsatisfied and it
+        # ranks behind TASK-003 despite sorting first by ID.
+        waiting = _ready_ticket(store, "Should come second")
+        free = _ready_ticket(store, "Should come first")
+        service.after_add(store, waiting, "FEAT-002", today="2026-03-20")
+        assert ids(service.next_tickets(store, limit=5)) == [free, waiting]
+
+    def test_a_satisfied_after_ranks_with_the_free_ones(self, store):
+        waiting = _ready_ticket(store, "Waiting on unfinished work")
+        satisfied = _ready_ticket(store, "Waiting on finished work")
+        service.after_add(store, waiting, "FEAT-002", today="2026-03-20")   # in-progress
+        service.after_add(store, satisfied, "FEAT-001", today="2026-03-20")  # complete
+        assert ids(service.next_tickets(store, limit=5)) == [satisfied, waiting]
+
+    def test_an_archived_after_target_counts_as_finished(self, store):
+        """An active-only board map doesn't carry archived tickets; resolving
+        the miss through the store is what keeps a finished target from
+        reading as a dangling one."""
+        waiting = _ready_ticket(store, "Waiting on unfinished work")
+        satisfied = _ready_ticket(store, "Waiting on archived work")
+        service.after_add(store, waiting, "FEAT-002", today="2026-03-20")
+        service.after_add(store, satisfied, "FEAT-000", today="2026-03-20")  # archived
+        assert ids(service.next_tickets(store, limit=5)) == [satisfied, waiting]
+
+    def test_a_dangling_after_target_is_not_satisfied(self, store):
+        """`after_add` refuses an unknown target, but a hand-edited note can
+        carry one -- and the conservative reading of 'all targets complete'
+        ranks it last rather than dropping it."""
+        dangling = _ready_ticket(store, "Points at nothing")
+        free = _ready_ticket(store, "Points at nothing at all")
+        ref, fm, body = service.read_ticket(store, dangling)
+        fm["after"] = ["NOPE-999"]
+        service.write_ticket(store, ref, fm, body)
+        assert ids(service.next_tickets(store, limit=5)) == [free, dangling]
+
+    def test_after_never_removes_a_ticket_from_the_ready_set(self, store):
+        """Soft precedence: the only ticket on offer is still on offer."""
+        ticket_id = _ready_ticket(store, "Waiting on unfinished work")
+        service.after_add(store, ticket_id, "FEAT-002", today="2026-03-20")
+        assert ids(service.next_tickets(store)) == [ticket_id]
+
+    def test_the_same_board_answers_the_same_way_twice(self, store):
+        _ready_ticket(store, "One", priority="high")
+        two = _ready_ticket(store, "Two")
+        _ready_ticket(store, "Three")
+        service.after_add(store, two, "FEAT-002", today="2026-03-20")
+        assert service.next_tickets(store, limit=5) == service.next_tickets(store, limit=5)
+
+
+class TestNextTicketsLimit:
+    def test_one_by_default(self, store):
+        _ready_ticket(store, "One")
+        _ready_ticket(store, "Two")
+        assert len(service.next_tickets(store)) == 1
+
+    def test_a_limit_takes_the_top_n(self, store):
+        high = _ready_ticket(store, "One", priority="high")
+        medium = _ready_ticket(store, "Two")
+        _ready_ticket(store, "Three", priority="low")
+        assert ids(service.next_tickets(store, limit=2)) == [high, medium]
+
+    def test_a_limit_past_the_ready_set_returns_what_there_is(self, store):
+        _ready_ticket(store, "One")
+        assert len(service.next_tickets(store, limit=50)) == 1
+
+    @pytest.mark.parametrize("limit", [0, -1, "2", 1.5, True])
+    def test_a_limit_below_one_is_named(self, store, limit):
+        with pytest.raises(service.Invalid) as e:
+            service.next_tickets(store, limit=limit)
+        assert "Must be a positive integer" in str(e.value)
+
+
+class TestNextTicketsCost:
+    def test_bodies_are_read_once_per_surviving_candidate_only(self, docs_root):
+        """`dispatch_problems` needs a body and a board listing carries none,
+        so a body is read per CANDIDATE -- and only for candidates the cheap
+        filters (status, tier) have already let through."""
+        class CountingStore(FakeStore):
+            def __init__(self):
+                super().__init__()
+                self.body_reads = 0
+
+            def read_ref(self, ref):
+                self.body_reads += 1
+                return super().read_ref(ref)
+
+        loaded = load_fake_store(docs_root)
+        store = CountingStore()
+        store.active, store.archived = loaded.active, loaded.archived
+        _ready_ticket(store, "Ready")  # model_tier 'standard' from the template
+
+        store.body_reads = 0
+        service.next_tickets(store)                 # exactly one candidate
+        with_candidate = store.body_reads
+
+        store.body_reads = 0
+        service.next_tickets(store, tier="heavy")   # filtered out before the read
+        without_candidate = store.body_reads
+
+        assert with_candidate - without_candidate == 1

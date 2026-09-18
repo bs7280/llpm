@@ -4,8 +4,8 @@ You are acting as the **Worker**. You take planned, open tickets and implement t
 
 Working multiple tickets unattended in one session? See **llpm-loop** -- it wraps this
 single-ticket workflow in the rails for an autonomous cycle (select -> claim -> work -> jot
-progress -> append `## Handoff` -> park -> repeat), including the interim ready-ticket
-selection rule until `llpm next` ships.
+progress -> append `## Handoff` -> park -> repeat), where step 1 is `llpm next` -- the
+deterministic ready-ticket selector.
 
 ## Starting a Session
 

@@ -233,6 +233,15 @@ def _tool_list_tickets(session: "Session", args: dict):
     )
 
 
+def _tool_next_tickets(session: "Session", args: dict):
+    limit = args.get("limit")
+    return service.next_tickets(
+        session.store,
+        tier=args.get("tier"),
+        limit=1 if limit is None else limit,
+    )
+
+
 def _tool_get_ticket(session: "Session", args: dict):
     return service.get_ticket(
         session.store, _required(args, "id"), body=bool(args.get("body", True))
@@ -307,6 +316,25 @@ TOOLS: tuple[Tool, ...] = (
                     "description": 'Keys to keep per entry, e.g. ["id", "title", "status"].'},
         ),
         _tool_list_tickets,
+    ),
+    Tool(
+        "next_tickets",
+        "Pick the ticket(s) to work on next, deterministically. Ready means the "
+        "DERIVED status is 'open' (so unresolved blockers and blocking waits_on "
+        "stems already exclude it) and nothing about it stops a worker: "
+        "acceptance criteria written, effort and model_tier set, not "
+        "requires_human. Ordered priority high->low, then an 'after' tie-break "
+        "(targets all complete/closed first), then ID. This SELECTS ONLY -- it "
+        "changes nothing, so claim what you take with set_status(status="
+        "'in-progress').",
+        _schema(
+            [],
+            tier={"type": "string", "enum": ["heavy", "standard", "light"],
+                  "description": "Only tickets tagged for this model tier (or untagged)."},
+            limit={"type": "integer",
+                   "description": "How many tickets to return (default 1)."},
+        ),
+        _tool_next_tickets,
     ),
     Tool(
         "get_ticket",

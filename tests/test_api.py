@@ -119,6 +119,58 @@ class TestTicketEndpoint:
         assert r.json()["detail"] == "Ticket 'NOPE-999' not found."
 
 
+class TestNextEndpoint:
+    """FEAT-009 over HTTP: the endpoint a dispatcher polls. Which tickets are
+    ready and in what order is pinned in test_service.py -- these check the
+    wiring, the query params and the error mapping."""
+
+    @pytest.fixture
+    def ready_board(self, docs_root):
+        """The fixture board plus one ticket nothing stops a worker taking."""
+        store = LocalDirStore(docs_root)
+        result = service.create_ticket(store, "task", "Fresh work",
+                                       body="## Acceptance Criteria\n\n- [ ] Works\n",
+                                       origin="human", created_by="test",
+                                       today="2026-03-20")
+        service.set_fields(store, result["id"], {"effort": "small"}, today="2026-03-20")
+        service.set_status(store, result["id"], "open", today="2026-03-20")
+        return TestClient(api.make_app(lambda repo: store)), result["id"]
+
+    def test_an_empty_ready_set_is_an_empty_array(self, client):
+        # The fixture board's only `open` ticket is blocked.
+        assert client.get("/demo/next").json() == []
+
+    def test_matches_the_service_exactly(self, ready_board, docs_root):
+        client, _ticket_id = ready_board
+        assert client.get("/demo/next").json() == \
+            service.next_tickets(LocalDirStore(docs_root))
+
+    def test_limit_and_tier_plumb_through(self, ready_board):
+        client, ticket_id = ready_board
+        assert ids(client.get("/demo/next").json()) == [ticket_id]
+        assert ids(client.get("/demo/next?limit=5&tier=standard").json()) == [ticket_id]
+        assert client.get("/demo/next?tier=heavy").json() == []
+
+    def test_an_unknown_tier_is_422(self, client):
+        r = client.get("/demo/next?tier=gigantic")
+        assert r.status_code == 422
+        assert "gigantic" in r.json()["detail"]
+
+    def test_a_limit_below_one_is_422(self, client):
+        r = client.get("/demo/next?limit=0")
+        assert r.status_code == 422
+        assert "positive integer" in r.json()["detail"]
+
+    def test_an_unknown_board_is_404(self, client):
+        assert client.get("/nosuch/next").status_code == 404
+
+    def test_next_is_not_read_as_a_ticket_id(self, client):
+        """`/{repo}/next` and `/{repo}/tickets/{id}` are different segments --
+        no route shadows the other."""
+        assert client.get("/demo/tickets/next").status_code == 404
+        assert client.get("/demo/next").status_code == 200
+
+
 class TestManyBoardsOneApp:
     """`repo` is a path parameter precisely so one process serves every board."""
 

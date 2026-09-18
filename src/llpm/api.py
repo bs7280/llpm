@@ -17,7 +17,8 @@ maps a repo name to its ``TicketStore`` (and caches it -- building a store per
 request would throw away the vault connection).
 
 TASK-016 served the read side, TASK-017 the status write, TASK-018 create and
-PATCH, TASK-019 the four edge pairs -- the whole FEAT-015 surface. Every handler
+PATCH, TASK-019 the four edge pairs -- the whole FEAT-015 surface -- and
+FEAT-009 added ``GET /{repo}/next``, the selection a dispatcher polls. Every handler
 hangs off the same ``_mapped()`` error mapping, which is the point of the typed
 service errors: ``NotFound`` -> 404, ``Invalid`` -> 422, ``Conflict`` -> 409.
 """
@@ -159,6 +160,15 @@ def make_router(store_for: StoreFor, boards: Boards | None = None) -> APIRouter:
                 include_archive=include_archived,
                 fields=_split_fields(fields),
             )
+
+    @router.get("/{repo}/next")
+    def get_next(repo: str, tier: str | None = None, limit: int = 1):
+        """Ready-ticket selection (FEAT-009) -- the scheduler primitive a
+        dispatcher polls. Declared before ``/{repo}/tickets/{ticket_id}``'s
+        sibling routes for readability only; ``next`` is a distinct path
+        segment, so no route shadows another."""
+        with _mapped():
+            return service.next_tickets(store_for(repo), tier=tier, limit=limit)
 
     @router.get("/{repo}/tickets/{ticket_id}")
     def get_ticket(repo: str, ticket_id: str, body: bool = True):

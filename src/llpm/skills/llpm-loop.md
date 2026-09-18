@@ -30,40 +30,42 @@ improvise the loop shape, and don't reach for subagents to pad out small tasks.
 
 ### 1. Select the Next Ready Ticket
 
-`llpm next` (FEAT-009, deterministic ready-ticket selection) does **not exist yet**. Until it
-ships, select manually:
-
 ```bash
-llpm list --status open --json    # or: llpm board (OPEN column)
+llpm next                          # the one ticket to work on next
+llpm next --tier light --json      # ...for your own model tier, as JSON
 ```
 
-- `--status` filters on **effective** status -- a ticket with unresolved blockers reports as
-  `blocked`, not `open`, so blocked tickets are already excluded. You don't need to separately
-  walk `blockers`.
-- `draft` and `planned` are **not workable** -- `draft` is an unspecified stub, `planned` is
-  spec'd but not yet approved for work. Only `open` (or effectively-open) tickets are ready.
-  `llpm backlog` shows draft+planned -- that's the pre-work pipeline, not your queue.
-- `--json` output is already sorted priority high -> low, then ID -- take the first ticket
-  you're equipped for. If several share top priority, a ticket's `after:` list is a soft
-  ordering hint (never blocks) -- prefer one whose `after` tickets are already done.
-- If a ticket carries `model_tier` (`light`/`standard`/`heavy`), prefer ones tagged for your
-  own tier, or untagged ones -- don't grab a `heavy`-tagged ticket as a light-tier worker.
-- `llpm lint` (TASK-014) names the tickets in the ready set that aren't dispatch-ready:
-  acceptance criteria missing or still the template placeholder (`no-ac`), no `effort`
-  (`no-effort`), no `model_tier` (`no-tier`), or `requires_human: true` (`requires-human` --
-  a human owns it, surface it rather than claim it). Run it alongside the listing and skip
-  what it flags:
+That is the whole step. `llpm next` (FEAT-009) is the deterministic selector -- don't
+reimplement it out of `llpm list` + your own judgement, and don't take a ticket it didn't
+offer you. It prints `No ready tickets.` when the queue is dry, which is stop condition 1 in
+step 7.
 
-  ```bash
-  llpm lint --json                  # [] means the whole ready set is dispatchable
-  ```
+What it already did for you, so you don't have to:
 
-  Today that skip is **manual** -- `llpm lint` is a report and refuses nothing. Once FEAT-009
-  ships, `llpm next` filters the ready set on the same predicate, so flagged tickets are
-  simply never selected. A `no-ac` ticket you'd otherwise have to spec yourself belongs back
-  with the planner: leave it, don't write its criteria and then grade yourself against them.
+- **Blocked work is gone.** Readiness is the **effective** status -- a ticket with an
+  unresolved `blockers` entry or a blocking `waits_on` stem reports as `blocked`, never
+  `open`, so you never walk edges yourself.
+- **Pre-work and claimed work are gone.** `draft` is an unspecified stub and `planned` is
+  spec'd but not approved; `in-progress` is someone's claim and `review` is parked.
+  `llpm backlog` shows the draft+planned pipeline -- that is the planner's queue, not yours.
+- **Undispatchable work is gone.** The same predicate `llpm lint` (TASK-014) reports gates
+  the ready set: acceptance criteria missing or still the template placeholder (`no-ac`), no
+  `effort` (`no-effort`), no `model_tier` (`no-tier`), `requires_human: true`
+  (`requires-human` -- a human owns it). A `no-ac` ticket you'd otherwise have to spec
+  yourself belongs back with the planner: leave it, don't write its criteria and then grade
+  yourself against them. `llpm lint` is still worth running when you want to *see* what was
+  skipped and why.
+- **Ordering is settled and reproducible**: priority high -> low, then an `after:` tie-break
+  (a ticket whose `after` targets are all complete/closed comes first -- `after` is soft
+  precedence and never blocks), then ID. The same board answers the same way every time.
 
-When FEAT-009 ships, replace this step with `llpm next` and drop the manual filtering above.
+`--tier heavy|standard|light` restricts the answer to tickets tagged for your own tier --
+pass it if you know which tier you are running as, so a light worker never picks up a
+`heavy` ticket. `-n N` returns the top N (default 1) when you want to see what's behind the
+one you're taking; take them one at a time regardless.
+
+`llpm next` **selects, it does not claim**: it writes nothing and changes no status. Step 2
+is still yours.
 
 ### 2. Claim It
 
@@ -174,8 +176,7 @@ Go back to step 1. Reselect -- don't assume the queue you saw at the start of th
 still accurate; a blocker may have cleared, or a new ticket may have gone `open` mid-session.
 
 Stop the loop when:
-- `llpm list --status open --json` (or `llpm board`'s OPEN column) comes back empty -- the
-  queue is dry.
+- `llpm next` says `No ready tickets.` (`[]` with `--json`) -- the queue is dry.
 - You hit a ticket you can't safely claim or finish -- spec unclear, missing information,
   genuinely out of scope. Push it back per **llpm-worker**'s "Handling Problems" and stop --
   do not guess, and do not spawn subagents to manufacture progress on a small task.
@@ -185,8 +186,9 @@ Stop the loop when:
 
 ## What This Skill Does NOT Do
 
-- **Does not implement `llpm next`** -- step 1 is a manual stand-in until FEAT-009 ships a
-  real deterministic scheduler. When it does, replace step 1 with `llpm next` wholesale.
+- **Does not re-implement selection** -- step 1 is `llpm next` (FEAT-009) and nothing else.
+  Don't rebuild it out of `llpm list` plus your own filtering; if `llpm next` offers nothing,
+  the queue is dry, not wrong.
 - **Does not fix the claim race** -- documents it as a tolerable-at-small-N gap, not a bug
   this skill patches.
 - **Does not enforce `## Handoff` via schema** -- convention only, unvalidated, on purpose.
@@ -196,8 +198,7 @@ Stop the loop when:
 ## Workflow Summary
 
 ```
-1. llpm list --status open --json        # select (manual until FEAT-009 ships llpm next)
-   llpm lint --json                      #   ...skipping what it flags (manual skip, for now)
+1. llpm next [--tier <tier>]             # select -- blocked/undispatchable already excluded
 2. llpm status TASK-XXX in-progress      # claim
 3. [implement per llpm-worker]           # work
 4. [append_content -> ## Worklog]        # jot progress as you go, at the moment it happens

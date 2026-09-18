@@ -1795,3 +1795,86 @@ class TestLint:
         out = capsys.readouterr().out
         assert "lint" in out
         assert "dispatch-ready" in out
+
+
+class TestNext:
+    """`llpm next` -- step 1 of the autonomous loop (FEAT-009).
+
+    The selection rules are pinned in test_service.py; what these check is the
+    printer: the two output modes, the flags reaching the service, and the
+    error path.
+    """
+
+    def _ready_ticket(self, docs_root, capsys, *args):
+        run_cli("create", "task", "Fresh work", "--origin", "human",
+                "--body", DISPATCHABLE_BODY, "--effort", "small", *args,
+                docs_root=docs_root)
+        capsys.readouterr()  # discard "Created TASK-00N ..."
+
+    def test_a_dry_queue_says_so(self, docs_root, capsys):
+        # The fixture board's only `open` ticket (TASK-001) is blocked.
+        run_cli("next", docs_root=docs_root)
+        assert capsys.readouterr().out.strip() == "No ready tickets."
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_a_ready_ticket_is_printed(self, mock_today, docs_root, capsys):
+        self._ready_ticket(docs_root, capsys)
+        run_cli("next", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "TASK-002" in out
+        assert "Fresh work" in out
+        assert "[standard]" in out   # the tier chip, as `llpm list` prints it
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_one_ticket_by_default_and_n_for_more(self, mock_today, docs_root, capsys):
+        self._ready_ticket(docs_root, capsys)
+        self._ready_ticket(docs_root, capsys)
+
+        run_cli("next", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "TASK-002" in out and "TASK-003" not in out
+
+        run_cli("next", "-n", "2", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "TASK-002" in out and "TASK-003" in out
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_tier_filters(self, mock_today, docs_root, capsys):
+        self._ready_ticket(docs_root, capsys)  # model_tier 'standard'
+        run_cli("next", "--tier", "standard", docs_root=docs_root)
+        assert "TASK-002" in capsys.readouterr().out
+        run_cli("next", "--tier", "heavy", docs_root=docs_root)
+        assert "No ready tickets." in capsys.readouterr().out
+
+    @patch.object(commands, "_today", return_value="2026-03-20")
+    def test_json_is_the_listing_shape(self, mock_today, docs_root, capsys):
+        import json
+        self._ready_ticket(docs_root, capsys)
+        run_cli("next", "--json", docs_root=docs_root)
+        data = json.loads(capsys.readouterr().out)
+        assert [t["id"] for t in data] == ["TASK-002"]
+        assert data[0]["effective_status"] == "open"
+        assert "body" not in data[0]
+
+    def test_json_is_an_empty_array_when_nothing_is_ready(self, docs_root, capsys):
+        import json
+        run_cli("next", "--json", docs_root=docs_root)
+        assert json.loads(capsys.readouterr().out) == []
+
+    def test_an_unknown_tier_is_refused_by_the_parser(self, docs_root, capsys):
+        with pytest.raises(SystemExit) as e:
+            run_cli("next", "--tier", "gigantic", docs_root=docs_root)
+        assert e.value.code == 2
+        assert "gigantic" in capsys.readouterr().err
+
+    def test_a_limit_below_one_errors(self, docs_root, capsys):
+        with pytest.raises(SystemExit) as e:
+            run_cli("next", "-n", "0", docs_root=docs_root)
+        assert e.value.code == 1
+        assert "Must be a positive integer" in capsys.readouterr().err
+
+    def test_help_lists_the_command(self, docs_root, capsys):
+        run_cli("help", docs_root=docs_root)
+        out = capsys.readouterr().out
+        assert "llpm next" in out
+        assert "Order is deterministic" in out

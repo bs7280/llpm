@@ -1409,6 +1409,41 @@ def cmd_lint(args) -> None:
         raise SystemExit(1)
 
 
+def cmd_next(args) -> None:
+    """Ready-ticket selection -- step 1 of the autonomous loop (FEAT-009).
+
+    A selector, not a claim: it prints what to work on next and changes
+    nothing, so `llpm status <ID> in-progress` is still the claim (and still
+    not compare-and-swap -- see the llpm-loop skill).
+    """
+    store, docs_root = _resolve_store_and_root(args)
+
+    use_json = getattr(args, "json", False)
+
+    with _cli_errors():
+        picked = service.next_tickets(
+            store,
+            tier=getattr(args, "tier", None),
+            limit=getattr(args, "limit", 1),
+        )
+
+    if use_json:
+        _json_out(picked)
+        return
+
+    if not picked:
+        print("No ready tickets.")
+        return
+
+    print(f"{'ID':<16} {'Type':<11} {'Priority':<11} {'Effort':<11} Title")
+    print("-" * 75)
+    for t in picked:
+        tier = t["model_tier"]
+        tier_chip = f" [{tier}]" if tier else ""
+        print(f"{t['id']:<16} {t['type']:<11} {t['priority']:<11} "
+              f"{t['effort'] or '-':<11} {t['title']}{tier_chip}")
+
+
 # -- serve (FEAT-015) --
 
 # FastAPI and uvicorn are an optional extra: the core install stays pyyaml-only,

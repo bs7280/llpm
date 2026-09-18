@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 
 from . import commands
-from .parser import VALID_EFFORTS, VALID_PRIORITIES
+from .parser import VALID_EFFORTS, VALID_MODEL_TIERS, VALID_PRIORITIES
 from .store import MdTreeStoreError
 
 
@@ -444,6 +444,30 @@ def _build_parser():
     p_lint.add_argument("--strict", action="store_true",
                         help="Exit 1 when any problem is reported (default: always exit 0)")
 
+    # -- next --
+    p_next = subparsers.add_parser(
+        "next",
+        description=(
+            "Select the ticket(s) a worker should be handed next -- step 1 of the "
+            "autonomous loop. A ticket is ready when its EFFECTIVE status is 'open' "
+            "(so unresolved 'blockers' and blocking 'waits_on' stems already exclude "
+            "it) and 'llpm lint' finds no problem with it: acceptance criteria "
+            "present, 'effort' and 'model_tier' set, not 'requires_human'. Order is "
+            "deterministic -- priority high->low, then an 'after:' tie-break (a "
+            "ticket whose 'after' targets are all complete/closed comes first), then "
+            "ID -- so the same board always answers the same way. "
+            "Selection only: it writes nothing and claims nothing, so claiming is "
+            "still 'llpm status <ID> in-progress'. Prints 'No ready tickets.' when "
+            "the queue is dry."
+        ),
+        help="Select the next ready ticket(s), deterministically (FEAT-009)",
+    )
+    p_next.add_argument("--tier", choices=sorted(VALID_MODEL_TIERS),
+                        help="Only tickets tagged for this model tier (or untagged)")
+    p_next.add_argument("-n", "--limit", type=int, default=1, metavar="N",
+                        help="How many tickets to return (default: 1)")
+    p_next.add_argument("--json", action="store_true", help="Output as JSON array")
+
     # -- project --
     p_project = subparsers.add_parser(
         "project",
@@ -558,6 +582,7 @@ def _run(args, parser, subparsers) -> None:
         "goals": commands.cmd_goals,
         "orphans": commands.cmd_orphans,
         "lint": commands.cmd_lint,
+        "next": commands.cmd_next,
         "project": commands.cmd_project,
         "mcp": commands.cmd_mcp,
         "serve": commands.cmd_serve,

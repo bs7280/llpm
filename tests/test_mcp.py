@@ -118,7 +118,8 @@ class TestToolListing:
     """What an MCP client sees -- and that it stays a face for the service."""
 
     EXPECTED = {
-        "list_tickets", "get_ticket", "create_ticket", "set_status", "set_fields",
+        "list_tickets", "next_tickets", "get_ticket", "create_ticket",
+        "set_status", "set_fields",
         "blocker_add", "blocker_rm", "after_add", "after_rm",
         "waits_add", "waits_rm", "serves_add", "serves_rm",
     }
@@ -179,6 +180,59 @@ class TestReadTools:
 
     def test_a_missing_required_argument_says_so(self, session):
         assert error_text(call(session, "get_ticket")) == "Error: 'id' is required."
+
+
+class TestNextTicketsTool:
+    """FEAT-009's face. Which tickets are ready and in what order is pinned in
+    test_service.py; what matters here is that the tool is that call and adds
+    nothing of its own."""
+
+    @pytest.fixture
+    def ready(self, store):
+        """The fixture board plus one ticket nothing stops a worker taking --
+        the fixture board alone has nothing ready (TASK-001 is blocked)."""
+        result = service.create_ticket(
+            store, "task", "Fresh work",
+            body="## Acceptance Criteria\n\n- [ ] Works\n",
+            origin="human", created_by="test", today="2026-03-20",
+        )
+        service.set_fields(store, result["id"], {"effort": "small"}, today="2026-03-20")
+        service.set_status(store, result["id"], "open", today="2026-03-20")
+        return result["id"]
+
+    def test_is_the_service_call(self, session, store, ready):
+        assert payload(call(session, "next_tickets")) == \
+            json.loads(json.dumps(service.next_tickets(store), default=str))
+
+    def test_a_dry_queue_is_an_empty_list(self, session):
+        assert payload(call(session, "next_tickets")) == []
+
+    def test_one_by_default_and_limit_for_more(self, session, store, ready):
+        service.set_status(store, "TASK-001", "planned", today="2026-03-20")
+        second = service.create_ticket(
+            store, "task", "More fresh work",
+            body="## Acceptance Criteria\n\n- [ ] Works\n",
+            origin="human", created_by="test", today="2026-03-20",
+        )["id"]
+        service.set_fields(store, second, {"effort": "small"}, today="2026-03-20")
+        service.set_status(store, second, "open", today="2026-03-20")
+
+        assert len(payload(call(session, "next_tickets"))) == 1
+        assert [t["id"] for t in payload(call(session, "next_tickets", limit=5))] == \
+            sorted([ready, second])
+
+    def test_tier_travels(self, session, ready):
+        assert [t["id"] for t in payload(call(session, "next_tickets", tier="standard"))] \
+            == [ready]
+        assert payload(call(session, "next_tickets", tier="heavy")) == []
+
+    def test_an_unknown_tier_is_llpm_s_own_sentence(self, session):
+        assert "Invalid model_tier: 'gigantic'" in \
+            error_text(call(session, "next_tickets", tier="gigantic"))
+
+    def test_a_non_integer_limit_is_refused_by_the_schema(self, session):
+        assert "'limit' must be an integer" in \
+            error_text(call(session, "next_tickets", limit="2"))
 
 
 # ---------------------------------------------------------------------------

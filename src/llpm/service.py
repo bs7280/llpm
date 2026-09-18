@@ -434,6 +434,116 @@ def lint_tickets(
     return report
 
 
+# -- Ready-ticket selection (FEAT-009) ---------------------------------------
+
+def _after_satisfied(
+    store: TicketStore, fm_or_ticket: dict, board_by_id: dict[str, dict]
+) -> bool:
+    """True when every ``after`` target of this ticket is complete/closed.
+
+    The ``after`` tie-break, and nothing more: this edge is soft precedence and
+    never removes a ticket from the ready set (``after_add`` even permits
+    cycles) -- it only decides which of two otherwise-equal tickets a worker is
+    handed first.
+
+    Targets resolve from the board already in memory, with a MISS falling
+    through to ``store.read`` -- the same rule ``parser.get_blocker_details``
+    follows, and for the same reason: an active-only board map doesn't carry
+    archived tickets, and an archived target is a *finished* one, not a
+    dangling one. A target that genuinely can't be read (deleted, unparseable)
+    is not satisfied, which ranks the ticket after its peers rather than
+    hiding it.
+    """
+    for target in fm_or_ticket.get("after") or []:
+        hit = board_by_id.get(str(target).upper())
+        if hit is None:
+            try:
+                found = store.read(str(target))
+            except (ValueError, yaml.YAMLError):
+                return False
+            if found is None:
+                return False
+            hit = found[1]
+        if hit.get("status") not in parser.RESOLVED_STATUSES:
+            return False
+    return True
+
+
+def next_tickets(
+    store: TicketStore, *, tier: str | None = None, limit: int = 1
+) -> list[dict]:
+    """The tickets a worker should be handed next, best first.
+
+    The scheduler primitive the autonomous loop calls (``llpm-loop`` step 1).
+    It SELECTS -- it writes nothing, claims nothing and flips no status, so two
+    workers calling it concurrently both get the same answer; claiming is still
+    ``llpm status <ID> in-progress`` and still not compare-and-swap.
+
+    Ready means all of:
+
+    - effective status ``open`` -- which is where the hard edges are honoured:
+      an unresolved ``blockers`` entry or a blocking ``waits_on`` stem derives
+      to ``blocked``, so the topological part of "topological over blockers +
+      waits_on" happens by exclusion rather than by sorting;
+    - ``parser.dispatch_problems`` empty -- the same predicate ``llpm lint``
+      reports, so the report and the selector cannot drift. ``requires_human``
+      is excluded by this (it is the ``requires-human`` code), not by a second
+      rule here;
+    - with ``tier``: ``model_tier`` equal to it, or unset. The unset half is
+      unreachable while ``no-tier`` is a dispatch problem -- a tier-less ticket
+      never reaches the ready set at all -- and is written anyway so the filter
+      stays correct if that ever relaxes.
+
+    Order is a total one, so the same board always yields the same list:
+    priority high->low, then the ``after`` tie-break (all targets complete or
+    closed first), then ID.
+
+    Cost: one board load, then one body read per candidate that survives the
+    cheap filters (status, tier) -- ``dispatch_problems`` needs a body and a
+    board listing carries none, exactly as for ``lint_tickets``.
+    """
+    if tier is not None and tier not in parser.VALID_MODEL_TIERS:
+        raise Invalid(
+            f"Invalid model_tier: '{tier}'. Must be one of: "
+            f"{', '.join(sorted(parser.VALID_MODEL_TIERS))}"
+        )
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+        raise Invalid(f"Invalid limit: '{limit}'. Must be a positive integer.")
+
+    board = load_board(store)
+    board_by_id = {
+        str(t["id"]).upper(): t for t in board if t.get("id")
+    }
+
+    ready = []
+    for entry in board:
+        if entry["effective_status"] != "open":
+            continue
+        if tier is not None and entry["model_tier"] not in (None, tier):
+            continue
+        _ref, fm, body = read_ticket(store, entry["id"])
+        if parser.dispatch_problems(fm, body):
+            continue
+        ready.append(entry)
+
+    # The `after` rank is resolved once per ready ticket, not inside the sort
+    # key: on a vault store an unresolved target is an HTTP read, and a
+    # comparison function would pay for it O(n log n) times.
+    ranked = [
+        (
+            (
+                _PRIORITY_RANK.get(t["priority"], 1),
+                0 if _after_satisfied(store, t, board_by_id) else 1,
+                t["id"],
+            ),
+            t,
+        )
+        for t in ready
+    ]
+    ranked.sort(key=lambda item: item[0])
+    return [t for _key, t in ranked[:limit]]
+
+
 # -- Write operations --------------------------------------------------------
 
 def _today() -> str:
