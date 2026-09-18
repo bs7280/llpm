@@ -335,6 +335,75 @@ class TestEdgeTools:
 
 
 # ---------------------------------------------------------------------------
+# Wrong-typed arguments and malformed envelopes
+# ---------------------------------------------------------------------------
+
+class TestArgumentTypeValidation:
+    """A tool call straight into ``service.py`` trusts its caller's types --
+    these are the three repro cases from mission-control's review (session
+    e84197f0): each silently corrupted data instead of refusing the call.
+    ``list("abc123")`` makes six one-character SHAs, a ``fields`` string is
+    iterated as characters, ``_as_list(5)`` makes a tag out of the int."""
+
+    def test_set_status_commits_must_be_an_array(self, session, store):
+        before = service.read_ticket(store, "TASK-001")[1].get("commits") or []
+        message = error_text(call(session, "set_status", id="TASK-001",
+                                  status="review", commits="abc123"))
+        assert "'commits'" in message
+        assert "array" in message
+        assert service.read_ticket(store, "TASK-001")[1].get("commits") in (None, before)
+
+    def test_list_tickets_fields_must_be_an_array(self, session):
+        message = error_text(call(session, "list_tickets", fields="id,title"))
+        assert "'fields'" in message
+        assert "array" in message
+
+    def test_create_ticket_tags_must_be_an_array(self, session, store):
+        before = {t["id"] for t in service.list_tickets(store)}
+        message = error_text(call(session, "create_ticket", type="task",
+                                  title="Should not be filed", tags=5))
+        assert "'tags'" in message
+        assert "array" in message
+        assert {t["id"] for t in service.list_tickets(store)} == before
+
+    def test_array_items_are_type_checked_too(self, session):
+        message = error_text(call(session, "set_status", id="TASK-001",
+                                  status="review", commits=[123]))
+        assert "'commits' items" in message
+        assert "string" in message
+
+    def test_a_boolean_argument_rejects_a_string(self, session):
+        message = error_text(call(session, "get_ticket", id="TASK-001", body="yes"))
+        assert "'body'" in message
+        assert "boolean" in message
+
+
+class TestMalformedEnvelope:
+    """Bad JSON-RPC structure -- not a bad tool call -- so it never reaches
+    llpm's own rules. Answered as -32602 with a sentence, never -32603 with
+    raw Python exception text (the AttributeError/TypeError that surfaced
+    before this fix)."""
+
+    def test_non_object_params_is_invalid_params_not_a_crash(self, session):
+        reply = session.handle(_request(1, "tools/call", ["not", "an", "object"]))
+        assert reply["error"]["code"] == -32602
+        assert "params" in reply["error"]["message"]
+
+    def test_non_string_tool_name_is_invalid_params_not_a_crash(self, session):
+        reply = session.handle(_request(
+            2, "tools/call", {"name": ["get_ticket"], "arguments": {}}
+        ))
+        assert reply["error"]["code"] == -32602
+        assert "name" in reply["error"]["message"]
+
+    def test_non_scalar_id_is_invalid_params_not_a_crash(self, session):
+        reply = session.handle({"jsonrpc": "2.0", "id": {"not": "scalar"}, "method": "ping"})
+        assert reply["error"]["code"] == -32602
+        assert "id" in reply["error"]["message"]
+        assert reply["id"] is None
+
+
+# ---------------------------------------------------------------------------
 # Degrading
 # ---------------------------------------------------------------------------
 

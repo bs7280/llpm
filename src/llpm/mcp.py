@@ -148,6 +148,80 @@ _ID_ARG = {"type": "string",
            "description": "Ticket ID on this board, e.g. TASK-001 (case-insensitive)."}
 
 
+_TYPE_ARTICLES = {"array": "an array", "object": "an object", "integer": "an integer",
+                   "string": "a string", "boolean": "a boolean", "number": "a number"}
+
+
+def _type_name(value: Any) -> str:
+    """The JSON Schema type name of a decoded JSON value.
+
+    Checked in this order because ``bool`` is a subclass of ``int`` in Python.
+    """
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, int):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    return type(value).__name__
+
+
+def _matches_schema_type(value: Any, expected: str) -> bool:
+    if expected == "boolean":
+        return isinstance(value, bool)
+    if expected == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected == "string":
+        return isinstance(value, str)
+    if expected == "object":
+        return isinstance(value, dict)
+    if expected == "array":
+        return isinstance(value, list)
+    return True  # a declared type this server never uses: nothing to check
+
+
+def _validate_args(tool: "Tool", args: dict) -> str | None:
+    """Type-check ``args`` against ``tool.schema`` before ``tool.run`` sees them.
+
+    A tool calls straight into ``service.py``, which trusts its caller's types
+    the way the CLI and REST both do: ``list(commits)`` on a string silently
+    makes six one-character SHAs rather than raising, ``_as_list(tags)`` on an
+    int makes a tag out of it. An MCP client is supposed to validate against
+    ``inputSchema`` before it ever calls ``tools/call``; this is the backstop
+    for one that doesn't, returning the first mismatch as a sentence naming the
+    argument and the type it needed to be.
+    """
+    properties = tool.schema.get("properties", {})
+    for key, value in args.items():
+        if value is None:
+            continue  # absent/null is a "missing" question, not a type one
+        prop = properties.get(key)
+        expected = prop.get("type") if prop else None
+        if expected is None:
+            continue
+        if not _matches_schema_type(value, expected):
+            return (f"'{key}' must be {_TYPE_ARTICLES.get(expected, expected)}, "
+                    f"got {_type_name(value)}.")
+        if expected == "array":
+            item_type = (prop.get("items") or {}).get("type")
+            if item_type is None:
+                continue
+            for item in value:
+                if not _matches_schema_type(item, item_type):
+                    return (f"'{key}' items must be "
+                            f"{_TYPE_ARTICLES.get(item_type, item_type)}, "
+                            f"got {_type_name(item)}.")
+    return None
+
+
 def _tool_list_tickets(session: "Session", args: dict):
     return service.list_tickets(
         session.store,
@@ -469,9 +543,18 @@ class Session:
         if message_id is None:
             self._notification(method)
             return None
+        if isinstance(message_id, (dict, list)):
+            # Not identifiable as a request id (JSON-RPC: string, number, or
+            # null) -- nothing sane to echo back, so answer with id: null.
+            return _error(None, _INVALID_PARAMS,
+                          "'id' must be a string or number, not an object or array.")
+
+        params = message.get("params")
+        if params is not None and not isinstance(params, dict):
+            return _error(message_id, _INVALID_PARAMS, "'params' must be an object.")
 
         try:
-            return _result(message_id, self._invoke(method, message.get("params") or {}))
+            return _result(message_id, self._invoke(method, params or {}))
         except _RpcError as e:
             return _error(message_id, e.code, str(e))
         except Exception as e:  # noqa: BLE001 -- a bad call must not end the session
@@ -510,6 +593,8 @@ class Session:
 
     def _call_tool(self, params: dict) -> dict:
         name = params.get("name")
+        if not isinstance(name, str):
+            raise _RpcError(_INVALID_PARAMS, "'name' must be a string.")
         tool = TOOLS_BY_NAME.get(name)
         if tool is None:
             raise _RpcError(_INVALID_PARAMS, f"Unknown tool: {name!r}")
@@ -517,6 +602,10 @@ class Session:
         args = params.get("arguments") or {}
         if not isinstance(args, dict):
             raise _RpcError(_INVALID_PARAMS, "'arguments' must be an object.")
+
+        type_error = _validate_args(tool, args)
+        if type_error is not None:
+            return _tool_error(type_error)
 
         try:
             return _tool_result(tool.run(self, args))
