@@ -273,15 +273,23 @@ def _query(req_or_url) -> dict:
     return {k: v[0] for k, v in qs.items()}
 
 
-def _serve_listing(stems_by_pattern: dict[str, list[str]]):
+def _serve_listing(stems_by_pattern: dict[str, list]):
     """urlopen side_effect: a paginating /notes endpoint over fixed stems,
-    honoring limit/offset the way the real service does."""
+    honoring limit/offset the way the real service does. An entry may be a
+    bare stem, or ``(stem, frontmatter)`` -- the frontmatter is returned only
+    when the caller asked for ``include=frontmatter``, as the vault does."""
     def side_effect(req_or_url, *a, **kw):
         q = _query(req_or_url)
-        stems = stems_by_pattern.get(q["pattern"], [])
+        entries = stems_by_pattern.get(q["pattern"], [])
         limit, offset = int(q.get("limit", 100)), int(q.get("offset", 0))
-        page = [{"stem": s, "title": None} for s in stems[offset:offset + limit]]
-        return _response({"items": page, "total": len(stems), "limit": limit, "offset": offset})
+        page = []
+        for entry in entries[offset:offset + limit]:
+            stem, fm = entry if isinstance(entry, tuple) else (entry, None)
+            item = {"stem": stem, "title": None}
+            if fm is not None and q.get("include") == "frontmatter":
+                item["frontmatter"] = fm
+            page.append(item)
+        return _response({"items": page, "total": len(entries), "limit": limit, "offset": offset})
     return side_effect
 
 
@@ -318,6 +326,32 @@ class TestMdTreeStoreSubnotes:
         assert store._is_ticket_stem("repos.org.repo.llpm.tasks.TASK-001")
         assert not store._is_ticket_stem("repos.org.repo.llpm.tasks.TASK-001.agent-workers.w1")
         assert not store._is_ticket_stem("repos.other.llpm.tasks.TASK-001")
+
+    def test_sibling_bucket_is_not_a_ticket(self, store):
+        # Depth alone doesn't decide: a non-ticket bucket beside the ticket
+        # buckets sits at exactly a ticket's depth. `list_tickets` never saw
+        # these (it globs each bucket by name); `load_frontmatter` globs the
+        # whole namespace, so it does.
+        assert not store._is_ticket_stem("repos.myrepo.llpm.milestones.M0")
+        assert not store._is_ticket_stem("repos.myrepo.llpm.templates.task")
+        assert store._is_ticket_stem("repos.myrepo.llpm.tasks.TASK-001")
+        assert store._is_ticket_stem("repos.myrepo.llpm.archive.TASK-000")
+
+    def test_load_frontmatter_skips_a_sibling_bucket(self, store):
+        # The board load crashed with KeyError: 'id' -- a milestone note
+        # carries `key:`, not `id:`, and was parsed as a ticket anyway.
+        listing = _serve_listing({
+            "repos.myrepo.llpm.*": [
+                ("repos.myrepo.llpm.tasks.TASK-001", {"id": "TASK-001", "type": "task"}),
+                ("repos.myrepo.llpm.milestones.M0", {"key": "M0", "title": "Week 1"}),
+                ("repos.myrepo.llpm.templates.task", {"type": "task"}),
+                ("repos.myrepo.llpm.tasks.TASK-001.agent-workers.w1", {"worker": "w1"}),
+            ],
+        })
+        with patch("urllib.request.urlopen", side_effect=listing):
+            pairs = store.load_frontmatter(include_archive=True)
+
+        assert [ref.vault_stem for ref, _ in pairs] == ["repos.myrepo.llpm.tasks.TASK-001"]
 
     def test_listing_asks_for_the_max_page(self, store):
         with patch("urllib.request.urlopen") as mock_open:

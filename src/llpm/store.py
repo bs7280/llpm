@@ -305,6 +305,10 @@ _TYPE_STEMS: dict[str, str] = {
 # Reverse map: plural sub-stem → type key (used when parsing listed stems)
 _STEM_TO_TYPE: dict[str, str] = {v: k for k, v in _TYPE_STEMS.items()}
 
+# The only buckets under `<ns>` that hold tickets. `<ns>.templates.<type>` is
+# the other bucket llpm itself writes; a board is free to keep more.
+_TICKET_BUCKETS: frozenset[str] = frozenset(_TYPE_STEMS.values()) | {"archive"}
+
 
 @dataclass(frozen=True)
 class VaultRef:
@@ -591,11 +595,23 @@ class MdTreeStore:
     # -- TicketStore protocol -------------------------------------------------
 
     def _is_ticket_stem(self, stem: str) -> bool:
-        """True for ``<ns>.<bucket>.<ID>`` exactly. The service's fnmatch ``*``
-        crosses dots, so ``<ns>.tasks.*`` also returns everything below each
-        ticket; those notes are the ticket's subnotes, not tickets."""
+        """True for ``<ns>.<ticket bucket>.<ID>`` exactly.
+
+        Two different things get excluded here, and both callers need both.
+        The service's fnmatch ``*`` crosses dots, so ``<ns>.tasks.*`` also
+        returns everything below each ticket -- those notes belong to the
+        ticket, they are not tickets. And ``load_frontmatter`` globs the whole
+        namespace, so it also sees buckets that aren't ticket buckets at all:
+        ``<ns>.templates.<type>``, or whatever else a board keeps beside its
+        tickets (one board has ``<ns>.milestones.M0``). Those sit at the same
+        depth as a ticket, so depth alone can't tell them apart -- and one
+        parsed as a ticket is a ``KeyError: 'id'`` on the whole board.
+        """
         prefix = self._ns + "."
-        return stem.startswith(prefix) and stem[len(prefix):].count(".") == 1
+        if not stem.startswith(prefix):
+            return False
+        bucket, sep, tail = stem[len(prefix):].partition(".")
+        return bool(sep) and "." not in tail and bucket in _TICKET_BUCKETS
 
     def list_tickets(self, include_archive: bool = True) -> list[VaultRef]:
         refs: list[VaultRef] = []
