@@ -432,6 +432,62 @@ class TestArgumentTypeValidation:
         assert "boolean" in message
 
 
+class TestUnknownArguments:
+    """An argument name absent from a tool's ``inputSchema`` -- e.g. ``n`` where
+    ``list_tickets`` wants nothing of the kind -- used to fall through the type
+    check silently and return the default answer (TASK-024)."""
+
+    def test_names_the_key_and_the_tool(self, session):
+        message = error_text(call(session, "list_tickets", n=5))
+        assert "'n'" in message
+        assert "list_tickets" in message
+
+    def test_suggests_a_near_miss_by_string_distance(self, session):
+        message = error_text(call(session, "next_tickets", limi=5))
+        assert "'limit'" in message
+
+    def test_no_suggestion_when_nothing_is_close(self, session):
+        message = error_text(call(session, "list_tickets", xyzzy=5))
+        assert "Did you mean" not in message
+
+    def test_unknown_key_is_reported_before_a_type_error_on_another_key(self, session):
+        message = error_text(call(session, "create_ticket", type="task", title="x",
+                                  tags=5, bogus="oops"))
+        assert "'bogus'" in message
+        assert "tags" not in message
+
+    def test_is_an_iserror_tool_result_not_a_protocol_error(self, session):
+        reply = session.handle(_request(1, "tools/call",
+                                        {"name": "list_tickets", "arguments": {"n": 5}}))
+        assert "error" not in reply
+        assert reply["result"]["isError"] is True
+
+    def test_every_tool_rejects_an_unknown_argument(self, session):
+        for tool in mcp.TOOLS:
+            message = error_text(call(session, tool.name, not_a_real_argument=1))
+            assert "'not_a_real_argument'" in message, tool.name
+
+    def test_a_null_valued_unknown_key_is_still_rejected(self, session):
+        message = error_text(call(session, "list_tickets", bogus=None))
+        assert "'bogus'" in message
+
+    def test_a_null_valued_known_key_is_not_a_type_error(self, session):
+        assert "isError" not in call(session, "get_ticket", id="FEAT-001", body=None)
+
+    def test_a_fully_specified_list_tickets_call_still_succeeds(self, session):
+        result = call(session, "list_tickets", status="open", type="task",
+                      parent="EPIC-001", include_archived=False, fields=["id", "title"])
+        assert "isError" not in result
+
+    def test_a_fully_specified_create_ticket_call_still_succeeds(self, session):
+        created = payload(call(session, "create_ticket", type="feature", title="Full call",
+                               body="## Goal\nDo it.\n", parent="EPIC-001", priority="low",
+                               effort="small", tags=["a", "b"], requires_human=False,
+                               serves=["goals.example"], triage=True,
+                               origin="human", created_by="tester"))
+        assert created["id"].startswith("FEAT-")
+
+
 class TestMalformedEnvelope:
     """Bad JSON-RPC structure -- not a bad tool call -- so it never reaches
     llpm's own rules. Answered as -32602 with a sentence, never -32603 with

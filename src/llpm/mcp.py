@@ -38,6 +38,7 @@ re-deriving a ticket costs a whole-board load for ``children`` on a vault store.
 
 from __future__ import annotations
 
+import difflib
 import json
 import sys
 from collections.abc import Callable
@@ -188,8 +189,19 @@ def _matches_schema_type(value: Any, expected: str) -> bool:
     return True  # a declared type this server never uses: nothing to check
 
 
+def _unknown_arg_message(tool: "Tool", key: str, properties: dict) -> str:
+    """'<key>' is not an argument of <tool>, plus a near-miss if there is one.
+
+    The near-miss is plain string distance over the schema's own property
+    names (``difflib``, stdlib -- no new dependency), not a semantic guess.
+    """
+    match = difflib.get_close_matches(key, properties.keys(), n=1)
+    hint = f" Did you mean {match[0]!r}?" if match else ""
+    return f"{key!r} is not an argument of {tool.name}.{hint}"
+
+
 def _validate_args(tool: "Tool", args: dict) -> str | None:
-    """Type-check ``args`` against ``tool.schema`` before ``tool.run`` sees them.
+    """Check ``args`` against ``tool.schema`` before ``tool.run`` sees them.
 
     A tool calls straight into ``service.py``, which trusts its caller's types
     the way the CLI and REST both do: ``list(commits)`` on a string silently
@@ -197,14 +209,24 @@ def _validate_args(tool: "Tool", args: dict) -> str | None:
     int makes a tag out of it. An MCP client is supposed to validate against
     ``inputSchema`` before it ever calls ``tools/call``; this is the backstop
     for one that doesn't, returning the first mismatch as a sentence naming the
-    argument and the type it needed to be.
+    argument.
+
+    An argument name absent from the schema is checked first, and for every
+    key regardless of value -- a ``null``-valued key that doesn't exist is
+    still the wrong name, even though a ``null`` value for a real key is just
+    "absent" (checked below). A call wrong in both ways reports the unknown
+    key first.
     """
     properties = tool.schema.get("properties", {})
+    for key in args:
+        if key not in properties:
+            return _unknown_arg_message(tool, key, properties)
+
     for key, value in args.items():
         if value is None:
             continue  # absent/null is a "missing" question, not a type one
-        prop = properties.get(key)
-        expected = prop.get("type") if prop else None
+        prop = properties[key]
+        expected = prop.get("type")
         if expected is None:
             continue
         if not _matches_schema_type(value, expected):
@@ -631,9 +653,9 @@ class Session:
         if not isinstance(args, dict):
             raise _RpcError(_INVALID_PARAMS, "'arguments' must be an object.")
 
-        type_error = _validate_args(tool, args)
-        if type_error is not None:
-            return _tool_error(type_error)
+        arg_error = _validate_args(tool, args)
+        if arg_error is not None:
+            return _tool_error(arg_error)
 
         try:
             return _tool_result(tool.run(self, args))
