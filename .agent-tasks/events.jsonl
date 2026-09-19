@@ -1,0 +1,23 @@
+{"agent": "mission-control", "kind": "create", "msg": "created", "priority": "high", "remote": "TASK-014", "seq": 1, "task": "TASK-001", "title": "TASK-014: llpm lint -- dispatch-readiness report", "ts": "2026-09-18T21:09:58Z"}
+{"agent": "mission-control", "kind": "create", "msg": "created", "priority": "high", "remote": "FEAT-016", "seq": 2, "task": "TASK-002", "title": "FEAT-016 fix: validate MCP tools/call arguments", "ts": "2026-09-18T21:09:58Z"}
+{"agent": "mission-control", "kind": "create", "msg": "created", "priority": "high", "remote": "FEAT-009 +area.homelab.agent-platform.task-fabric.goals-layer +area.homelab.agent-platform.task-fabric.dispatch", "seq": 3, "task": "TASK-003", "title": "FEAT-009: llpm next -- deterministic ready-ticket selection", "ts": "2026-09-18T21:09:58Z"}
+{"agent": "task-001-2fb44389", "kind": "claim", "msg": "claimed", "seq": 4, "task": "TASK-001", "ts": "2026-09-18T21:09:58Z"}
+{"agent": "dispatcher", "kind": "log", "msg": "dispatched worker task-001-2fb44389 (session 2fb44389-15cd-4e7f-89c8-bea7ccf7ffb2, pid 63926, model opus, cwd /Users/benshaughnessy/code/llpm-worktrees/task-001-2fb44389)", "seq": 5, "task": "TASK-001", "ts": "2026-09-18T21:09:59Z"}
+{"agent": "task-002-c47e6348", "kind": "claim", "msg": "claimed", "seq": 6, "task": "TASK-002", "ts": "2026-09-18T21:09:59Z"}
+{"agent": "dispatcher", "kind": "log", "msg": "dispatched worker task-002-c47e6348 (session c47e6348-c927-4a54-a3cc-08fac8afc6c4, pid 63941, model sonnet, cwd /Users/benshaughnessy/code/llpm-worktrees/task-002-c47e6348)", "seq": 7, "task": "TASK-002", "ts": "2026-09-18T21:10:00Z"}
+{"agent": "dispatcher", "kind": "log", "msg": "outbox of task-002-c47e6348 folded:", "seq": 8, "task": "TASK-002", "ts": "2026-09-18T21:16:40Z"}
+{"agent": "task-002-c47e6348", "from": "in_progress", "kind": "status", "msg": "status: in_progress -> review (outbox sentinel)", "seq": 9, "task": "TASK-002", "to": "review", "ts": "2026-09-18T21:16:40Z", "worker": "task-002-c47e6348"}
+{"agent": "mission-control", "from": "review", "kind": "status", "msg": "status: review -> done", "seq": 10, "task": "TASK-002", "to": "done", "ts": "2026-09-18T21:18:15Z"}
+{"agent": "dispatcher", "kind": "log", "msg": "outbox of task-001-2fb44389 folded:", "seq": 11, "task": "TASK-001", "ts": "2026-09-18T21:18:56Z"}
+{"agent": "task-001-2fb44389", "from": "in_progress", "kind": "status", "msg": "status: in_progress -> review (outbox sentinel)", "seq": 12, "task": "TASK-001", "to": "review", "ts": "2026-09-18T21:18:56Z", "worker": "task-001-2fb44389"}
+{"agent": "mission-control", "from": "review", "kind": "status", "msg": "status: review -> done", "seq": 13, "task": "TASK-001", "to": "done", "ts": "2026-09-18T21:20:18Z"}
+{"agent": "task-003-d68fd9d4", "kind": "claim", "msg": "claimed", "seq": 14, "task": "TASK-003", "ts": "2026-09-18T21:20:40Z"}
+{"agent": "dispatcher", "kind": "log", "msg": "dispatched worker task-003-d68fd9d4 (session d68fd9d4-f12e-456a-afeb-a1b88cece50f, pid 90360, model opus, cwd /Users/benshaughnessy/code/llpm-worktrees/task-003-d68fd9d4)", "seq": 15, "task": "TASK-003", "ts": "2026-09-18T21:20:41Z"}
+{"agent": "dispatcher", "kind": "log", "msg": "outbox of task-003-d68fd9d4 folded:", "seq": 16, "task": "TASK-003", "ts": "2026-09-18T21:32:25Z"}
+{"agent": "task-003-d68fd9d4", "from": "in_progress", "kind": "status", "msg": "status: in_progress -> review (outbox sentinel)", "seq": 17, "task": "TASK-003", "to": "review", "ts": "2026-09-18T21:32:25Z", "worker": "task-003-d68fd9d4"}
+{"agent": "mission-control", "from": "review", "kind": "status", "msg": "status: review -> done", "seq": 18, "task": "TASK-003", "to": "done", "ts": "2026-09-18T21:34:20Z"}
+{"agent": "agent", "kind": "create", "msg": "created", "priority": "normal", "remote": "TASK-024", "seq": 19, "task": "TASK-004", "title": "TASK-024: MCP tools/call rejects unknown argument names", "ts": "2026-09-19T22:25:25Z"}
+{"agent": "task-004-83ac5ea7", "kind": "claim", "msg": "claimed", "seq": 20, "task": "TASK-004", "ts": "2026-09-19T22:26:06Z"}
+{"agent": "dispatcher", "kind": "log", "msg": "dispatched worker task-004-83ac5ea7 (session 83ac5ea7-9395-451f-b83f-376870a91e79, pid 59307, model sonnet, cwd /Users/benshaughnessy/code/llpm-worktrees/task-004-83ac5ea7)", "seq": 21, "task": "TASK-004", "ts": "2026-09-19T22:26:08Z"}
+{"agent": "dispatcher", "kind": "log", "msg": "outbox of task-004-83ac5ea7 folded:", "seq": 22, "task": "TASK-004", "ts": "2026-09-19T22:31:32Z"}
+{"agent": "task-004-83ac5ea7", "from": "in_progress", "kind": "status", "msg": "status: in_progress -> review (outbox sentinel)", "seq": 23, "task": "TASK-004", "to": "review", "ts": "2026-09-19T22:31:32Z", "worker": "task-004-83ac5ea7"}

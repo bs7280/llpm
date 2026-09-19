@@ -1,4 +1,71 @@
 {
   "version": 1,
-  "tasks": {}
+  "tasks": {
+    "TASK-001": {
+      "title": "TASK-014: llpm lint -- dispatch-readiness report",
+      "status": "done",
+      "priority": "high",
+      "assignee": "task-001-2fb44389",
+      "blockers": [],
+      "tags": [
+        "llpm"
+      ],
+      "created": "2026-09-18T21:09:58Z",
+      "updated": "2026-09-18T21:20:18Z",
+      "note": "tasks/TASK-001.md",
+      "model": "opus",
+      "remote": "TASK-014",
+      "claimed_at": "2026-09-18T21:09:58Z"
+    },
+    "TASK-002": {
+      "title": "FEAT-016 fix: validate MCP tools/call arguments",
+      "status": "done",
+      "priority": "high",
+      "assignee": "task-002-c47e6348",
+      "blockers": [],
+      "tags": [
+        "llpm",
+        "mcp"
+      ],
+      "created": "2026-09-18T21:09:58Z",
+      "updated": "2026-09-18T21:18:15Z",
+      "note": "tasks/TASK-002.md",
+      "model": "sonnet",
+      "remote": "FEAT-016",
+      "claimed_at": "2026-09-18T21:09:59Z"
+    },
+    "TASK-003": {
+      "title": "FEAT-009: llpm next -- deterministic ready-ticket selection",
+      "status": "done",
+      "priority": "high",
+      "assignee": "task-003-d68fd9d4",
+      "blockers": [
+        "TASK-001",
+        "TASK-002"
+      ],
+      "tags": [
+        "llpm"
+      ],
+      "created": "2026-09-18T21:09:58Z",
+      "updated": "2026-09-18T21:34:20Z",
+      "note": "tasks/TASK-003.md",
+      "model": "opus",
+      "remote": "FEAT-009 +area.homelab.agent-platform.task-fabric.goals-layer +area.homelab.agent-platform.task-fabric.dispatch",
+      "claimed_at": "2026-09-18T21:20:40Z"
+    },
+    "TASK-004": {
+      "title": "TASK-024: MCP tools/call rejects unknown argument names",
+      "status": "review",
+      "priority": "normal",
+      "assignee": "task-004-83ac5ea7",
+      "blockers": [],
+      "tags": [],
+      "created": "2026-09-19T22:25:25Z",
+      "updated": "2026-09-19T22:31:32Z",
+      "note": "tasks/TASK-004.md",
+      "model": "sonnet",
+      "remote": "TASK-024",
+      "claimed_at": "2026-09-19T22:26:06Z"
+    }
+  }
 }
