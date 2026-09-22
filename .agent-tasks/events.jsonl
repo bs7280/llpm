@@ -21,3 +21,5 @@
 {"agent": "dispatcher", "kind": "log", "msg": "dispatched worker task-004-83ac5ea7 (session 83ac5ea7-9395-451f-b83f-376870a91e79, pid 59307, model sonnet, cwd /Users/benshaughnessy/code/llpm-worktrees/task-004-83ac5ea7)", "seq": 21, "task": "TASK-004", "ts": "2026-09-19T22:26:08Z"}
 {"agent": "dispatcher", "kind": "log", "msg": "outbox of task-004-83ac5ea7 folded:", "seq": 22, "task": "TASK-004", "ts": "2026-09-19T22:31:32Z"}
 {"agent": "task-004-83ac5ea7", "from": "in_progress", "kind": "status", "msg": "status: in_progress -> review (outbox sentinel)", "seq": 23, "task": "TASK-004", "to": "review", "ts": "2026-09-19T22:31:32Z", "worker": "task-004-83ac5ea7"}
+{"agent": "mission-control", "kind": "log", "msg": "llpm ticket verified and flipped complete in the 2026-09-19 mission-control cycle; wrapper closed in the 2026-09-21 hygiene pass", "seq": 24, "task": "TASK-004", "ts": "2026-09-22T00:12:44Z"}
+{"agent": "mission-control", "from": "review", "kind": "status", "msg": "status: review -> done", "seq": 25, "task": "TASK-004", "to": "done", "ts": "2026-09-22T00:12:44Z"}

@@ -1,7 +1,7 @@
 ---
 id: TASK-004
 title: TASK-024: MCP tools/call rejects unknown argument names
-status: review
+status: done
 created: 2026-09-19T22:25:25Z
 remote: TASK-024
 ---
@@ -61,3 +61,5 @@ _(worker scratch space -- findings, decisions, open questions)_
     
     STATUS: review
 - 2026-09-19T22:31:32Z [task-004-83ac5ea7] status: in_progress -> review (outbox sentinel)
+- 2026-09-22T00:12:44Z [mission-control] llpm ticket verified and flipped complete in the 2026-09-19 mission-control cycle; wrapper closed in the 2026-09-21 hygiene pass
+- 2026-09-22T00:12:44Z [mission-control] status: review -> done
