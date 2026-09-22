@@ -97,13 +97,13 @@ caller names `created_by` in the tool arguments, exactly as it does for
 ## TLS trust for the vault store (`kind = "mdtree"`)
 
 The homelab serves `*.home.lab` with a certificate signed by a **mkcert** root
-CA. Python's stdlib `urllib` (which LLPM uses — no extra deps) does **not** read
+CA. Python's stdlib `ssl` (which LLPM uses — no extra deps) does **not** read
 the macOS system trust store, so that CA is not trusted out of the box even
 though your browser and `curl` accept it. `NODE_EXTRA_CA_CERTS` (exported for
 node MCP clients) does nothing for Python.
 
 Without trust configured you'll get a clear, actionable error rather than a
-urllib traceback. Fix it one of two ways:
+Python traceback. Fix it one of two ways:
 
 **Option A — environment variable (per shell, or make it permanent).** Python's
 `ssl` honors `SSL_CERT_FILE` / `SSL_CERT_DIR`:

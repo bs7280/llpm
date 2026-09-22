@@ -560,8 +560,8 @@ def main(argv: list[str] | None = None) -> None:
     try:
         _run(args, parser, subparsers)
     except MdTreeStoreError as e:
-        # Vault store trust/config problem — show the actionable message, not a
-        # urllib traceback.
+        # Vault store trust/config/reachability problem — show the actionable
+        # message, not a traceback.
         print(f"Error: {e}", file=sys.stderr)
         raise SystemExit(1)
 

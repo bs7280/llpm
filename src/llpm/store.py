@@ -12,10 +12,14 @@ is what the CLI prints today -- zero behavior change.
 
 from __future__ import annotations
 
+import http.client
+import io
 import json
 import os
 import re
+import selectors
 import ssl
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -30,10 +34,10 @@ from . import parser as _parser
 
 class MdTreeStoreError(Exception):
     """A vault-store operation failed in a way worth surfacing to the user as a
-    clean, actionable message rather than a raw urllib traceback.
+    clean, actionable message rather than a raw traceback.
 
-    Currently raised for TLS trust problems (Python not trusting the homelab
-    mkcert root CA) and for a misconfigured ``[store] ca`` path.
+    Raised for TLS trust problems (Python not trusting the homelab mkcert root
+    CA), a misconfigured ``[store] ca`` path, and an unreachable vault.
     """
 
 
@@ -349,8 +353,9 @@ class VaultRef:
 class MdTreeStore:
     """TicketStore implementation that stores tickets in the agent-memory vault.
 
-    Talks to the markdown-tree-service REST API using stdlib ``urllib`` only —
-    no extra dependencies.
+    Talks to the markdown-tree-service REST API using stdlib ``http.client``
+    only — no extra dependencies — over one keep-alive connection per thread
+    (see ``_send``).
 
     Stem layout::
 
@@ -390,6 +395,10 @@ class MdTreeStore:
         self._ns = f"repos.{repo_stem}.llpm"
         self._ca = ca
         self._ssl_ctx: ssl.SSLContext | None = None  # built lazily from _ca
+        # One keep-alive connection per THREAD, never per store: `llpm serve`
+        # keeps one store per board and FastAPI runs its endpoints on a
+        # threadpool, and an HTTPConnection can't carry two exchanges at once.
+        self._local = threading.local()
         # Foreign-stem read cache, scoped to ONE read scope (see
         # begin_read_scope): several tickets often wait on the same target, and
         # board rendering resolves each ticket independently. It is emptied at
@@ -418,25 +427,114 @@ class MdTreeStore:
                 ) from e
         return self._ssl_ctx
 
-    def _open(self, req_or_url):
-        """``urllib.request.urlopen`` wrapper: threads the SSL context and turns
-        transport failures into an actionable ``MdTreeStoreError`` instead of a
-        40-line urllib traceback.  ``HTTPError`` (4xx/5xx) propagates unchanged
-        so callers keep handling 404/409 themselves."""
+    def _open(self, req_or_url) -> io.BytesIO:
+        """Send one request (a URL for a GET, a ``urllib.request.Request`` for
+        anything else) and turn transport failures into an actionable
+        ``MdTreeStoreError`` instead of a 40-line traceback.  ``HTTPError`` (any
+        non-2xx) propagates unchanged so callers keep handling 404/409
+        themselves."""
         try:
-            return urllib.request.urlopen(req_or_url, context=self._context())
+            return self._send(req_or_url)
         except urllib.error.HTTPError:
-            raise
-        except urllib.error.URLError as e:
-            if isinstance(e.reason, ssl.SSLCertVerificationError):
-                raise MdTreeStoreError(self._tls_hint()) from e
-            # DNS failure, connection refused/reset, timeout, etc. — the vault
-            # is unreachable, not a cert-trust problem.
+            raise  # an OSError too -- keep it out of the branch below
+        except ssl.SSLCertVerificationError as e:
+            raise MdTreeStoreError(self._tls_hint()) from e
+        except (OSError, http.client.HTTPException) as e:
+            # DNS failure, connection refused/reset, etc. — the vault is
+            # unreachable, not a cert-trust problem.
             raise MdTreeStoreError(
-                f"Could not reach the vault at {self._base}: {e.reason}. "
+                f"Could not reach the vault at {self._base}: {e}. "
                 f"Check that the service is up and that store.url in "
                 f".llpm/config.toml is correct."
             ) from e
+
+    # How a reused connection the server has already dropped fails
+    # (``RemoteDisconnected`` is both of the first two).
+    _STALE = (http.client.BadStatusLine, ConnectionResetError, BrokenPipeError)
+
+    def _send(self, req_or_url) -> io.BytesIO:
+        """One exchange over this thread's keep-alive connection -- the
+        urlopen-shaped seam ``_open`` wraps (and the tests stub): a URL or a
+        ``Request`` in, the whole body out, ``HTTPError`` for any non-2xx, raw
+        transport exceptions otherwise.
+
+        A fresh connection per request cost a TCP + TLS handshake each time --
+        34 ms against 14 ms reused on the LAN, and seconds from a container
+        that re-resolves DNS per connection (TASK-015).
+
+        The server may close a connection whenever it is idle. When it hung up
+        *between* our requests that is seen before sending, so nothing goes
+        into a dead socket. The race left over -- it hung up as the request
+        arrived -- raises one of ``_STALE`` and is retried once on a fresh
+        connection. Only a *reused* connection is retried: a fresh one failing
+        isn't staleness, and resending a create or a move on a guess could
+        apply it twice.
+        """
+        conn = self._connection()
+        req = (req_or_url if isinstance(req_or_url, urllib.request.Request)
+               else urllib.request.Request(req_or_url))
+        if conn.sock is not None and self._peer_closed(conn.sock):
+            conn.close()
+        reused = conn.sock is not None
+        try:
+            resp, body = self._exchange(conn, req)
+        except self._STALE:
+            if not reused:
+                raise
+            resp, body = self._exchange(conn, req)
+        if not 200 <= resp.status < 300:
+            raise urllib.error.HTTPError(
+                req.full_url, resp.status, resp.reason, resp.headers, io.BytesIO(body)
+            )
+        return io.BytesIO(body)
+
+    @staticmethod
+    def _exchange(conn: http.client.HTTPConnection, req: urllib.request.Request):
+        """Send ``req`` and read the whole response: ``(response, body)``.
+        Reading all of it is what frees the connection for the next request."""
+        try:
+            conn.request(
+                req.get_method(), req.selector, body=req.data,
+                headers={"User-Agent": "llpm", **dict(req.header_items())},
+            )
+            resp = conn.getresponse()
+            return resp, resp.read()
+        except BaseException:
+            conn.close()  # a half-finished exchange must never carry the next one
+            raise
+
+    @staticmethod
+    def _peer_closed(sock) -> bool:
+        """True when an idle keep-alive socket is readable. Between requests
+        the server has nothing to say, so readable means it hung up (EOF or a
+        TLS close_notify) -- the check urllib3 makes before reusing one."""
+        with selectors.DefaultSelector() as sel:
+            sel.register(sock, selectors.EVENT_READ)
+            return bool(sel.select(timeout=0))
+
+    def _connection(self) -> http.client.HTTPConnection:
+        """This thread's connection, made on first use. It connects lazily and
+        reconnects by itself after a close."""
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            url = urllib.parse.urlsplit(self._base)
+            if url.scheme == "https":
+                conn = http.client.HTTPSConnection(url.netloc, context=self._context())
+            elif url.scheme == "http":
+                conn = http.client.HTTPConnection(url.netloc)
+            else:
+                raise MdTreeStoreError(
+                    f"store.url must be an http(s) URL, got {self._base!r}."
+                )
+            self._local.conn = conn
+        return conn
+
+    def close(self) -> None:
+        """Close this thread's connection; the next request opens a new one.
+        Optional -- a process exiting closes it just the same."""
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.close()
 
     def _tls_hint(self) -> str:
         """Actionable message for a server-certificate verification failure."""
